@@ -17,7 +17,8 @@ export default function Landing() {
           <span className="text-ink-500">Perfectly typed.</span>
         </h1>
         <p className="text-lg text-ink-500 max-w-xl mx-auto mb-10">
-          Print a template, write your letters, scan it back — and type anything in your own handwriting forever.
+          Print a template, write your letters and photograph it. NeverWrite then writes wedding envelopes,
+          thank-you notes and gift cards in your own hand, one for every name on your list.
         </p>
         <div className="flex items-center justify-center gap-4 flex-wrap">
           <button
@@ -87,7 +88,7 @@ export default function Landing() {
               icon: <Camera className="w-6 h-6" />,
               step: '3',
               title: 'Type anything',
-              desc: 'Upload your scans and InkTwin builds a personal font. Now type any text and download it in your own hand.',
+              desc: 'Upload your scans and NeverWrite learns your letters. Type a message, add a guest list, and download a card for every name.',
             },
           ].map((card) => (
             <div key={card.step} className="bg-white border border-ink-100 rounded-xl p-6 shadow-sm hover:shadow-md transition-shadow">
