@@ -1,1 +1,1 @@
-"""InkTwin backend application package."""
+"""NeverWrite backend application package."""

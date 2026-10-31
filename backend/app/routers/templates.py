@@ -1,53 +1,39 @@
 """Router: /api/templates
 
-Serves metadata about available handwriting-sheet templates.  In a future
-release this router will also vend the downloadable PDF template files.
+Describes the three handwriting capture sheets and serves each one as a
+printable PDF.
 """
 from typing import Any, Dict, List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Response, status
+
+from workers.template import (
+    GROUPS_PER_ROW,
+    SHEET_CONFIGS,
+    VARIANTS,
+    build_template_pdf,
+    sheet_name,
+    template_filename,
+)
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
-# ---------------------------------------------------------------------------
-# Stub template catalogue — replace with DB or file-system discovery later
-# ---------------------------------------------------------------------------
 
-_TEMPLATES: List[Dict[str, Any]] = [
-    {
-        "id": "sheet-1-lowercase",
-        "sheet_number": 1,
-        "name": "Sheet 1: Lowercase (a–z)",
-        "description": "2 rows × 13 columns. Row 1 has a–m, Row 2 has n–z. Generous box size for natural handwriting.",
+def _describe(sheet_number: int) -> Dict[str, Any]:
+    charset = SHEET_CONFIGS[sheet_number]["charset"]
+    return {
+        "id": f"sheet-{sheet_number}",
+        "sheet_number": sheet_number,
+        "name": f"Sheet {sheet_number}: {sheet_name(sheet_number)}",
+        "description": (
+            f"{len(charset)} characters, {VARIANTS} boxes each, "
+            f"{GROUPS_PER_ROW} characters per row on plain A4."
+        ),
         "paper_size": "A4",
-        "rows": 2,
-        "columns": 13,
-        "characters": "abcdefghijklmnopqrstuvwxyz",
-        "download_url": None,
-    },
-    {
-        "id": "sheet-2-uppercase",
-        "sheet_number": 2,
-        "name": "Sheet 2: Uppercase (A–Z)",
-        "description": "2 rows × 13 columns. Row 1 has A–M, Row 2 has N–Z.",
-        "paper_size": "A4",
-        "rows": 2,
-        "columns": 13,
-        "characters": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        "download_url": None,
-    },
-    {
-        "id": "sheet-3-digits-punct",
-        "sheet_number": 3,
-        "name": "Sheet 3: Digits & Punctuation",
-        "description": "3 rows × 10 columns. Digits 0–9 and common punctuation.",
-        "paper_size": "A4",
-        "rows": 3,
-        "columns": 10,
-        "characters": "0123456789.,!?;:'\"-()",
-        "download_url": None,
-    },
-]
+        "variants": VARIANTS,
+        "characters": charset,
+        "download_url": f"/api/templates/{sheet_number}/pdf",
+    }
 
 
 @router.get(
@@ -56,10 +42,28 @@ _TEMPLATES: List[Dict[str, Any]] = [
     response_model=List[Dict[str, Any]],
 )
 def list_templates() -> List[Dict[str, Any]]:
-    """Return metadata for all available handwriting-sheet templates.
+    """Return metadata for every capture sheet, including its PDF download URL."""
+    return [_describe(n) for n in sorted(SHEET_CONFIGS)]
 
-    Each entry describes the paper size, grid layout, and the set of
-    characters the sheet covers.  The ``download_url`` field will be
-    populated once PDF generation is implemented.
+
+@router.get(
+    "/{sheet_number}/pdf",
+    summary="Download a printable capture sheet",
+    response_class=Response,
+)
+def download_template(sheet_number: int) -> Response:
+    """Return the A4 PDF for one sheet: corner markers, three boxes per
+    character, and light cyan guides the extractor removes by colour.
+
+    Raises
+    ------
+    HTTPException
+        404 if there is no sheet with that number.
     """
-    return _TEMPLATES
+    if sheet_number not in SHEET_CONFIGS:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Sheet {sheet_number} not found.")
+    return Response(
+        content=build_template_pdf(sheet_number),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{template_filename(sheet_number)}"'},
+    )

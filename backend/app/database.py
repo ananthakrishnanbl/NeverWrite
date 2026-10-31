@@ -2,7 +2,7 @@
 from pathlib import Path
 from typing import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 from app.config import DATA_DIR, DB_PATH, UPLOAD_DIR, GLYPH_DIR, EXPORT_DIR
@@ -41,7 +41,7 @@ def get_db() -> Generator[Session, None, None]:
 def init_db() -> None:
     """Create all tables and required data subdirectories if they don't exist."""
     # Import models so that Base knows about them before create_all
-    from app.models import profile, glyph, render_job  # noqa: F401
+    from app.models import profile, glyph, render_job, render_batch  # noqa: F401
 
     # Ensure the data directories exist
     for directory in (DATA_DIR, UPLOAD_DIR, GLYPH_DIR, EXPORT_DIR):
@@ -49,3 +49,23 @@ def init_db() -> None:
 
     # Create tables
     Base.metadata.create_all(bind=engine)
+    _add_new_columns()
+
+
+# Columns added after the first release. create_all only creates missing
+# tables, so older databases get these through ALTER TABLE.
+_NEW_COLUMNS = {
+    "glyphs": {"issue": "VARCHAR"},
+    "render_jobs": {"missing_chars": "VARCHAR"},
+}
+
+
+def _add_new_columns() -> None:
+    """Add any column in ``_NEW_COLUMNS`` that an existing table lacks."""
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table, columns in _NEW_COLUMNS.items():
+            existing = {col["name"] for col in inspector.get_columns(table)}
+            for name, sql_type in columns.items():
+                if name not in existing:
+                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")

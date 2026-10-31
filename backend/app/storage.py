@@ -34,13 +34,16 @@ def save_upload(data: bytes, filename: str, subdir: str = "uploads") -> str:
     return f"{subdir}/{safe_name}"
 
 
-def save_glyph_mask(data: bytes, profile_id: int, char: str, variant: int) -> str:
+def save_glyph_mask(data: bytes, profile_id: int, char: str, variant: int, tag: str = "") -> str:
     """Save a glyph mask PNG and return its relative path.
 
-    Files are stored at ``DATA_DIR/glyphs/<profile_id>/<case_prefix>_<char>_<variant>.png``.
+    Files are stored at ``DATA_DIR/glyphs/<profile_id>/<case_prefix>_<char>_<variant>[_<tag>].png``.
     On Windows NTFS, filenames are case-insensitive, so we prefix with
     ``lower_``, ``upper_``, or ``char_<hex>`` to prevent uppercase and lowercase
     glyphs (e.g. 'A' and 'a') from overwriting each other.
+
+    Pass a ``tag`` unique to the scan so a rescanned variant gets a new URL
+    and browsers don't keep showing the old image.
 
     Parameters
     ----------
@@ -52,6 +55,8 @@ def save_glyph_mask(data: bytes, profile_id: int, char: str, variant: int) -> st
         The single character this glyph represents.
     variant:
         Zero-based variant index.
+    tag:
+        Optional suffix, e.g. a short id of the extraction job.
 
     Returns
     -------
@@ -70,7 +75,7 @@ def save_glyph_mask(data: bytes, profile_id: int, char: str, variant: int) -> st
     subdir = Path("glyphs") / str(profile_id)
     target_dir = DATA_DIR / subdir
     target_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{char_key}_{variant}.png"
+    filename = f"{char_key}_{variant}_{tag}.png" if tag else f"{char_key}_{variant}.png"
     dest = target_dir / filename
     dest.write_bytes(data)
     # Return forward slashes for web serving

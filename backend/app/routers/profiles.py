@@ -12,6 +12,7 @@ from app.config import GLYPH_DIR, UPLOAD_DIR
 from app.database import get_db
 from app.models.profile import Profile
 from app.models.glyph import Glyph
+from app.models.render_batch import RenderBatch
 from app.models.render_job import RenderJob
 from app.schemas.profile import ProfileCreate, ProfileRead
 from app.storage import get_file_path
@@ -107,7 +108,7 @@ def get_profile(profile_id: int, db: Session = Depends(get_db)) -> ProfileRead:
     status_code=status.HTTP_204_NO_CONTENT,
 )
 def delete_profile(profile_id: int, db: Session = Depends(get_db)) -> None:
-    """Delete a Profile, its glyphs and render jobs, and every file they own.
+    """Delete a Profile, its glyphs, render jobs and batches, and every file they own.
 
     Removes the uploaded sheet photos, the glyph masks and any exported PDFs,
     since handwriting samples are personal data.
@@ -125,6 +126,11 @@ def delete_profile(profile_id: int, db: Session = Depends(get_db)) -> None:
         if render_job.output_path:
             get_file_path(render_job.output_path).unlink(missing_ok=True)
     db.query(RenderJob).filter(RenderJob.profile_id == profile_id).delete()
+    for batch in db.query(RenderBatch).filter(RenderBatch.profile_id == profile_id):
+        for rel_path in (batch.output_path, batch.zip_path):
+            if rel_path:
+                get_file_path(rel_path).unlink(missing_ok=True)
+    db.query(RenderBatch).filter(RenderBatch.profile_id == profile_id).delete()
     db.query(Glyph).filter(Glyph.profile_id == profile_id).delete()
     db.delete(profile)
     db.commit()

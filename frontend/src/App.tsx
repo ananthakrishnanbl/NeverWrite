@@ -9,6 +9,7 @@ import GlyphReview from './pages/GlyphReview'
 import StylePreview from './pages/StylePreview'
 import Composer from './pages/Composer'
 import Export from './pages/Export'
+import BatchExport from './pages/BatchExport'
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/profiles/:profileId/preview" element={<StylePreview />} />
         <Route path="/profiles/:profileId/compose" element={<Composer />} />
         <Route path="/profiles/:profileId/export/:renderId" element={<Export />} />
+        <Route path="/profiles/:profileId/export/batch/:batchId" element={<BatchExport />} />
       </Route>
     </Routes>
   )

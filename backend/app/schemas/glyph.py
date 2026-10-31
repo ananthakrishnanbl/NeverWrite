@@ -19,6 +19,7 @@ class GlyphRead(BaseModel):
     bearing_left: float
     bearing_right: float
     accepted: bool
+    issue: Optional[str] = None
 
     class Config:
         from_attributes = True
