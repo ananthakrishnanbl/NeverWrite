@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, PenLine, Camera, ChevronRight, User } from 'lucide-react'
-import { listProfiles, createProfile, Profile } from '../lib/api'
+import { Plus, PenLine, Camera, ChevronRight, User, Trash2 } from 'lucide-react'
+import { listProfiles, createProfile, deleteProfile, Profile } from '../lib/api'
 
 export default function ProfileList() {
   const navigate = useNavigate()
@@ -23,11 +23,21 @@ export default function ProfileList() {
     if (!newName.trim()) return
     setCreating(true)
     try {
-      await createProfile(newName.trim())
-      navigate('/template')
+      const profile = await createProfile(newName.trim())
+      navigate(`/template?profileId=${profile.id}`)
     } catch {
       setError('Failed to create profile.')
       setCreating(false)
+    }
+  }
+
+  const handleDelete = async (profile: Profile) => {
+    if (!window.confirm(`Delete "${profile.name}" and all of its handwriting samples? This can't be undone.`)) return
+    try {
+      await deleteProfile(profile.id)
+      setProfiles((prev) => prev.filter((p) => p.id !== profile.id))
+    } catch {
+      setError('Failed to delete profile.')
     }
   }
 
@@ -123,6 +133,14 @@ export default function ProfileList() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleDelete(p)}
+                  className="p-1.5 rounded-lg text-ink-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                  title="Delete profile"
+                  aria-label={`Delete ${p.name}`}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
                 <button
                   onClick={() => navigate(`/profiles/${p.id}/capture`)}
                   className="flex items-center gap-1.5 text-sm border border-ink-200 text-ink-600 px-3 py-1.5 rounded-lg hover:bg-ink-50 transition-colors"
