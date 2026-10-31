@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Download, ArrowLeft, CheckCircle, AlertCircle, FileImage, FileText } from 'lucide-react'
-import { getRender, pollJob, getRenderFileUrl, RenderJob } from '../lib/api'
+import { getRender, getRenderFileUrl, RenderJob, RenderSettings } from '../lib/api'
 
 export default function Export() {
   const { profileId, renderId } = useParams<{ profileId: string; renderId: string }>()
@@ -14,30 +14,33 @@ export default function Export() {
   useEffect(() => {
     if (!renderId) return
     const id = Number(renderId)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let cancelled = false
+    let loaded = false
 
-    getRender(id)
-      .then((r) => {
+    // Poll the render record until it finishes; the timer is cleared on unmount
+    const check = async () => {
+      try {
+        const r = await getRender(id)
+        if (cancelled) return
+        loaded = true
         setRender(r)
         setLoading(false)
         if (r.status === 'done') { setJobDone(true); return }
         if (r.status === 'error') { setError(r.error ?? 'Render failed.'); return }
-        // Poll via job — backend may expose job status separately
-        // For renders we poll the render endpoint directly
-        const interval = setInterval(async () => {
-          try {
-            const updated = await getRender(id)
-            setRender(updated)
-            if (updated.status === 'done') { setJobDone(true); clearInterval(interval) }
-            if (updated.status === 'error') { setError(updated.error ?? 'Render failed.'); clearInterval(interval) }
-          } catch { /* swallow */ }
-        }, 2000)
-        return () => clearInterval(interval)
-      })
-      .catch(() => { setError('Failed to load render job.'); setLoading(false) })
+      } catch {
+        if (cancelled) return
+        if (!loaded) { setError('Failed to load render job.'); setLoading(false); return }
+        // later failures are transient; keep polling
+      }
+      timer = setTimeout(check, 2000)
+    }
+    check()
+    return () => { cancelled = true; clearTimeout(timer) }
   }, [renderId])
 
   const pdfUrl = renderId ? getRenderFileUrl(Number(renderId)) : '#'
-  const pageCount = render?.settings ? Math.ceil(render.text.length / 500) : 1
+  const settings = parseSettings(render?.settings_json)
 
   return (
     <div className="max-w-xl mx-auto px-4 py-12">
@@ -86,10 +89,6 @@ export default function Export() {
           {render && (
             <div className="bg-white border border-ink-100 rounded-xl p-5 text-sm text-ink-600 space-y-2">
               <div className="flex justify-between">
-                <span>Pages</span>
-                <span className="font-mono text-ink-800">{pageCount}</span>
-              </div>
-              <div className="flex justify-between">
                 <span>Seed</span>
                 <span className="font-mono text-ink-800">{render.seed.toString(16).padStart(8, '0')}</span>
               </div>
@@ -97,10 +96,12 @@ export default function Export() {
                 <span>Created</span>
                 <span className="font-mono text-ink-800">{new Date(render.created_at).toLocaleString()}</span>
               </div>
-              <div className="flex justify-between">
-                <span>Font size</span>
-                <span className="font-mono text-ink-800">{render.settings.font_size}pt</span>
-              </div>
+              {settings?.font_size !== undefined && (
+                <div className="flex justify-between">
+                  <span>Font size</span>
+                  <span className="font-mono text-ink-800">{settings.font_size}pt</span>
+                </div>
+              )}
             </div>
           )}
 
@@ -145,4 +146,13 @@ export default function Export() {
       </button>
     </div>
   )
+}
+
+function parseSettings(json: string | undefined): Partial<RenderSettings> | null {
+  if (!json) return null
+  try {
+    return JSON.parse(json) as Partial<RenderSettings>
+  } catch {
+    return null
+  }
 }

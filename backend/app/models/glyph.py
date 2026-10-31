@@ -32,7 +32,9 @@ class Glyph(Base):
     height:
         Bounding-box height in pixels.
     baseline_offset:
-        Distance in pixels from the top of the bounding box to the baseline.
+        How far the bottom edge of the mask sits below the writing baseline,
+        in pixels. Positive for descenders, negative for marks above the
+        line such as apostrophes, measured from the scanned row.
     bearing_left:
         Left side-bearing in pixels (space before the ink starts).
     bearing_right:

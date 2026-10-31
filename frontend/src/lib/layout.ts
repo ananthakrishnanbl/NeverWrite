@@ -26,9 +26,29 @@ const PAGE_H_PX = Math.round(A4_H_MM * PX_PER_MM)
 // Points to pixels: 1 pt = 1/72 inch = 96/72 px at 96 dpi
 const PT_TO_PX = 96 / 72
 
+// Letters with no ascender or descender; their height is the x-height
+const X_HEIGHT_CHARS = new Set('acemnorsuvwxz')
+
+/**
+ * Median height of the profile's short lowercase letters, in glyph pixels.
+ * Falls back to the stored profile metric, then to 32.
+ */
+export function estimateXHeight(glyphs: Glyph[], fallback: number): number {
+  const heights = glyphs
+    .filter((g) => g.accepted && X_HEIGHT_CHARS.has(g.char))
+    .map((g) => g.height)
+    .sort((a, b) => a - b)
+  if (heights.length === 0) return fallback > 0 ? fallback : 32
+  const mid = Math.floor(heights.length / 2)
+  return heights.length % 2 ? heights[mid] : (heights[mid - 1] + heights[mid]) / 2
+}
+
 /**
  * Lay out `text` using `glyphs` and `settings`.
  * Returns placed glyphs per page.
+ *
+ * backend/workers/renderer.py ports this function line for line so the PDF
+ * matches the preview. Change both together, including the order of rng calls.
  */
 export function layoutText(
   text: string,
@@ -51,7 +71,7 @@ export function layoutText(
   // Font size in px
   const fontSizePx = settings.font_size * PT_TO_PX
   // Scale factor: how much to scale glyphs so their x-height matches fontSizePx
-  const xHeightRef = profileXHeight > 0 ? profileXHeight : 32 // fallback px
+  const xHeightRef = estimateXHeight(glyphs, profileXHeight)
   const baseScale = fontSizePx / xHeightRef
 
   // Margins in px
@@ -170,6 +190,27 @@ export function layoutText(
   }
 }
 
+/** Glyph masks recoloured to the ink colour, keyed by image URL and colour. */
+const tintCache = new Map<string, HTMLCanvasElement>()
+
+function tinted(img: HTMLImageElement, url: string, color: string): HTMLCanvasElement {
+  const key = `${url}|${color}`
+  const hit = tintCache.get(key)
+  if (hit) return hit
+  // Tint on a separate canvas: source-in on the page canvas would fill the
+  // whole glyph box, because the paper underneath is opaque
+  const c = document.createElement('canvas')
+  c.width = img.naturalWidth
+  c.height = img.naturalHeight
+  const t = c.getContext('2d')!
+  t.drawImage(img, 0, 0)
+  t.globalCompositeOperation = 'source-in'
+  t.fillStyle = color
+  t.fillRect(0, 0, c.width, c.height)
+  tintCache.set(key, c)
+  return c
+}
+
 /** Paper background colors */
 const PAPER_COLORS: Record<RenderSettings['paper_type'], string> = {
   plain: '#faf8f4',
@@ -253,7 +294,6 @@ export async function renderToCanvas(
   const page = pages[pageIndex]
   if (!page) return
 
-  // Parse ink color for tinting
   const inkColor = settings.ink_color || '#1a1a2e'
 
   const toUrl = (rawPath: string): string => {
@@ -281,7 +321,8 @@ export async function renderToCanvas(
   await Promise.allSettled(uniquePaths.map(loadImage))
 
   for (const placed of page) {
-    const img = imageCache.get(toUrl(placed.glyph.mask_path))
+    const url = toUrl(placed.glyph.mask_path)
+    const img = imageCache.get(url)
     if (!img) continue
 
     const { x, y, scale, rotation, glyph } = placed
@@ -295,16 +336,8 @@ export async function renderToCanvas(
     ctx.translate(x + drawW / 2, centerY)
     ctx.rotate(rotation)
 
-    // Draw transparent PNG glyph
-    ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH)
-
-    // Optional ink tinting if user changed color
-    if (inkColor && inkColor !== '#1a1a2e' && inkColor !== '#000000') {
-      ctx.globalCompositeOperation = 'source-in'
-      ctx.fillStyle = inkColor
-      ctx.fillRect(-drawW / 2, -drawH / 2, drawW, drawH)
-      ctx.globalCompositeOperation = 'source-over'
-    }
+    // Draw transparent PNG glyph in the ink colour
+    ctx.drawImage(tinted(img, url, inkColor), -drawW / 2, -drawH / 2, drawW, drawH)
 
     ctx.restore()
   }

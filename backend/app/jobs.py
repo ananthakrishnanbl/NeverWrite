@@ -42,6 +42,7 @@ def create_job(job_type: str, meta: dict) -> str:
             "stage": "",
             "meta": meta,
             "error": None,
+            "warning": None,
         }
     return jid
 

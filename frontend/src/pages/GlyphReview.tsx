@@ -206,7 +206,7 @@ export default function GlyphReview() {
 
             {/* Sliders */}
             {[
-              { label: 'Baseline offset', key: 'baseline_offset' as keyof GlyphPatch, min: -10, max: 10, step: 0.5 },
+              { label: 'Baseline offset', key: 'baseline_offset' as keyof GlyphPatch, min: -80, max: 80, step: 1 },
               { label: 'Left bearing', key: 'bearing_left' as keyof GlyphPatch, min: 0, max: 20, step: 0.5 },
               { label: 'Right bearing', key: 'bearing_right' as keyof GlyphPatch, min: 0, max: 20, step: 0.5 },
             ].map(({ label, key, min, max, step }) => (

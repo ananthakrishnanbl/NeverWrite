@@ -3,20 +3,21 @@
 Takes a RenderJob from the database, loads the associated Profile's accepted
 glyphs, and composites them into a PDF page that mimics natural handwriting.
 
-Randomness is controlled by a seedable mulberry32 PRNG so renders are
-reproducible given the same seed.
+The layout is a line-for-line port of ``layoutText`` in
+``frontend/src/lib/layout.ts``: same units, same settings, and the same order
+of PRNG calls, so a given seed produces the same page in the live preview and
+in the exported PDF. Change both files together.
 """
 from __future__ import annotations
 
 import json
 import logging
 import math
-import random
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from reportlab.lib.pagesizes import A4, letter
-from reportlab.lib.units import mm
+from PIL import Image
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas as rl_canvas
 
 from app import jobs as job_store
@@ -53,40 +54,51 @@ class Mulberry32:
         return z / 0x100000000
 
     def next_int(self, lo: int, hi: int) -> int:
-        """Return a random integer in ``[lo, hi]`` inclusive."""
-        return lo + int(self.next_float() * (hi - lo + 1))
+        """Return a random integer in ``[lo, hi]`` inclusive (``randInt`` in prng.ts)."""
+        return math.floor(lo + self.next_float() * (hi - lo + 1))
 
     def next_range(self, lo: float, hi: float) -> float:
-        """Return a random float in ``[lo, hi]``."""
+        """Return a random float in ``[lo, hi)`` (``randRange`` in prng.ts)."""
         return lo + self.next_float() * (hi - lo)
 
 
 # ---------------------------------------------------------------------------
-# Default render settings
+# Page geometry and default settings (mirror layout.ts and the frontend store)
 # ---------------------------------------------------------------------------
 
+_PX_PER_MM = 96 / 25.4
+_PT_TO_PX = 96 / 72
+_PX_TO_PT = 72 / 96
+
+# A4 at 96 dpi, rounded the way Math.round does
+_PAGE_W_PX = math.floor(210 * _PX_PER_MM + 0.5)
+_PAGE_H_PX = math.floor(297 * _PX_PER_MM + 0.5)
+
 _DEFAULT_SETTINGS: Dict[str, Any] = {
-    "font_size": 18,          # pt — glyph scaling target height
-    "line_spacing": 1.4,      # multiple of font_size
-    "ink_color": (0.05, 0.05, 0.20),  # RGB in [0,1] — dark navy blue
-    "margins": {              # all in mm
-        "top": 20,
-        "bottom": 20,
-        "left": 20,
-        "right": 20,
-    },
-    "paper_type": "A4",       # "A4" or "letter"
+    "font_size": 12,          # pt, x-height of the written text
+    "line_spacing": 2.8,      # multiple of font_size (the x-height)
+    "ink_color": "#1a1a2e",
+    "margin_top": 20,         # mm
+    "margin_bottom": 20,
+    "margin_left": 25,
+    "margin_right": 20,
+    "messiness": 40,          # 0..100
+    "slant_correction": 0,    # degrees
 }
 
-_PAPER_SIZES: Dict[str, Tuple[float, float]] = {
-    "A4": A4,
-    "letter": letter,
-}
+_X_HEIGHT_CHARS = set("acemnorsuvwxz")
 
-# Jitter parameters
-_ROTATION_JITTER_DEG = 2.0   # ± degrees
-_SIZE_JITTER_FRAC = 0.03     # ± 3 % of target height
-_BASELINE_WOBBLE_PT = 1.0    # ± points of vertical displacement
+
+@dataclass
+class PlacedGlyph:
+    """One glyph on a page, in 96 dpi page pixels (same as ``PlacedGlyph`` in layout.ts)."""
+
+    glyph: Glyph
+    x: float
+    y: float          # baseline y
+    scale: float
+    rotation: float   # radians, clockwise on the page
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -115,6 +127,7 @@ def run_render(job_id: str, render_id: int, db_session_factory) -> None:
         logger.exception("Renderer failed for job %s / render %d", job_id, render_id)
         job_store.update_job(job_id, status="error", error=str(exc))
         # Persist error status to DB
+        db.rollback()
         rj = db.query(RenderJob).filter(RenderJob.id == render_id).first()
         if rj is not None:
             rj.status = "error"
@@ -144,7 +157,8 @@ def _run(job_id: str, render_id: int, db: Any) -> None:
     db.commit()
 
     # ------------------------------------------------------------------
-    # 2. Load Profile + Glyphs
+    # 2. Load Profile + Glyphs (same order as GET /profiles/{id}/glyphs,
+    #    which the preview uses, so variant indices line up)
     # ------------------------------------------------------------------
     job_store.update_job(job_id, progress=10, stage="Loading glyphs")
     profile: Optional[Profile] = db.query(Profile).filter(Profile.id == render_job.profile_id).first()
@@ -153,69 +167,35 @@ def _run(job_id: str, render_id: int, db: Any) -> None:
 
     glyphs: List[Glyph] = (
         db.query(Glyph)
-        .filter(Glyph.profile_id == render_job.profile_id, Glyph.accepted == True)  # noqa: E712
+        .filter(Glyph.profile_id == render_job.profile_id)
+        .order_by(Glyph.char, Glyph.variant_index)
         .all()
     )
 
-    # Build a lookup: char → [Glyph, ...]
-    glyph_map: Dict[str, List[Glyph]] = {}
-    for g in glyphs:
-        glyph_map.setdefault(g.char, []).append(g)
-
     # ------------------------------------------------------------------
-    # 3. Parse settings
+    # 3. Parse settings (the frontend's RenderSettings shape)
     # ------------------------------------------------------------------
     job_store.update_job(job_id, progress=15, stage="Parsing settings")
     try:
         user_settings: Dict[str, Any] = json.loads(render_job.settings_json or "{}")
     except json.JSONDecodeError:
         user_settings = {}
-
     settings = {**_DEFAULT_SETTINGS, **user_settings}
-    font_size_pt: float = float(settings.get("font_size", _DEFAULT_SETTINGS["font_size"]))
-    line_spacing: float = float(settings.get("line_spacing", _DEFAULT_SETTINGS["line_spacing"]))
-    ink_color: Tuple[float, float, float] = tuple(settings.get("ink_color", _DEFAULT_SETTINGS["ink_color"]))  # type: ignore
-    margins_mm: Dict[str, float] = settings.get("margins", _DEFAULT_SETTINGS["margins"])
-    paper_type: str = settings.get("paper_type", "A4")
 
-    paper_size = _PAPER_SIZES.get(paper_type, A4)
-    page_w, page_h = paper_size
-
-    margin_top = float(margins_mm.get("top", 20)) * mm
-    margin_bottom = float(margins_mm.get("bottom", 20)) * mm
-    margin_left = float(margins_mm.get("left", 20)) * mm
-    margin_right = float(margins_mm.get("right", 20)) * mm
-
-    text_width = page_w - margin_left - margin_right
-    usable_height = page_h - margin_top - margin_bottom
-
-    line_height = font_size_pt * line_spacing
+    try:
+        metrics = json.loads(profile.metrics_json or "{}")
+    except json.JSONDecodeError:
+        metrics = {}
+    profile_x_height = float(metrics.get("x_height") or 0)
 
     # ------------------------------------------------------------------
-    # 4. Initialise PRNG
-    # ------------------------------------------------------------------
-    rng = Mulberry32(render_job.seed)
-
-    # ------------------------------------------------------------------
-    # 5 & 6. Word-wrap text into lines and plan glyph placements
+    # 4. Lay out the text exactly as the preview does
     # ------------------------------------------------------------------
     job_store.update_job(job_id, progress=30, stage="Planning layout")
-
-    # Build a list of (char, Glyph | None) pairs in display order
-    placements: List[Tuple[str, Optional[Glyph]]] = _plan_placements(
-        text=render_job.text,
-        glyph_map=glyph_map,
-        rng=rng,
-    )
-
-    lines = _word_wrap(
-        placements=placements,
-        text_width=text_width,
-        font_size_pt=font_size_pt,
-    )
+    pages = layout_text(render_job.text, glyphs, settings, profile_x_height, render_job.seed)
 
     # ------------------------------------------------------------------
-    # 7. Render to PDF with ReportLab
+    # 5. Render to PDF with ReportLab
     # ------------------------------------------------------------------
     job_store.update_job(job_id, progress=50, stage="Rendering PDF")
 
@@ -224,70 +204,42 @@ def _run(job_id: str, render_id: int, db: Any) -> None:
     output_abs = EXPORT_DIR / output_filename
     output_rel = f"exports/{output_filename}"
 
-    c = rl_canvas.Canvas(str(output_abs), pagesize=paper_size)
-    c.setFillColorRGB(*ink_color)
+    page_w_pt = _PAGE_W_PX * _PX_TO_PT
+    page_h_pt = _PAGE_H_PX * _PX_TO_PT
+    ink_rgb = _parse_hex_color(str(settings.get("ink_color", "")))
+    tinted: Dict[int, Optional[ImageReader]] = {}
 
-    cursor_y = page_h - margin_top  # ReportLab y=0 is bottom-left
-
-    for line_idx, line in enumerate(lines):
-        if cursor_y - line_height < margin_bottom:
-            # Start a new page when we run out of vertical space
-            c.showPage()
-            c.setFillColorRGB(*ink_color)
-            cursor_y = page_h - margin_top
-
-        cursor_x = margin_left
-
-        for char, glyph in line:
-            rotation_deg = rng.next_range(-_ROTATION_JITTER_DEG, _ROTATION_JITTER_DEG)
-            size_jitter = 1.0 + rng.next_range(-_SIZE_JITTER_FRAC, _SIZE_JITTER_FRAC)
-            baseline_wobble = rng.next_range(-_BASELINE_WOBBLE_PT, _BASELINE_WOBBLE_PT)
-
-            target_h = font_size_pt * size_jitter
-            draw_y = cursor_y - target_h + baseline_wobble
-
-            if char == " ":
-                # Advance cursor by a word gap
-                space_w = _space_width(font_size_pt, glyph_map)
-                cursor_x += space_w
+    # invariant=1 drops the timestamp and random document ID, so the same
+    # text, profile and seed always produce a byte-identical PDF
+    c = rl_canvas.Canvas(str(output_abs), pagesize=(page_w_pt, page_h_pt), invariant=1)
+    for page in pages:
+        for placed in page:
+            g = placed.glyph
+            if g.id not in tinted:
+                tinted[g.id] = _tinted_mask(g, ink_rgb)
+            image = tinted[g.id]
+            if image is None:
                 continue
 
-            if glyph is None:
-                # No glyph available — use a fallback advance
-                cursor_x += font_size_pt * 0.6
-                continue
+            # Same geometry as renderToCanvas: bottom of the mask sits
+            # baseline_offset below the baseline, rotation about the centre
+            draw_w = max(1.0, g.width * placed.scale)
+            draw_h = max(1.0, g.height * placed.scale)
+            center_y = placed.y - draw_h / 2 + g.baseline_offset * placed.scale
 
-            # Scale glyph to target height
-            scale = target_h / max(glyph.height, 1.0)
-            draw_w = glyph.width * scale
-
-            abs_mask = get_file_path(glyph.mask_path)
-            if abs_mask.exists():
-                # Draw glyph image rotated around its centre
-                cx = cursor_x + draw_w / 2.0
-                cy = draw_y + target_h / 2.0
-                c.saveState()
-                c.translate(cx, cy)
-                c.rotate(rotation_deg)
-                c.drawImage(
-                    str(abs_mask),
-                    x=-draw_w / 2.0,
-                    y=-target_h / 2.0,
-                    width=draw_w,
-                    height=target_h,
-                    mask="auto",  # treat white as transparent
-                )
-                c.restoreState()
-
-            advance = draw_w + glyph.bearing_right * scale
-            cursor_x += advance
-
-        cursor_y -= line_height
+            c.saveState()
+            # Page pixels are y-down; PDF points are y-up
+            c.translate((placed.x + draw_w / 2) * _PX_TO_PT, page_h_pt - center_y * _PX_TO_PT)
+            c.rotate(-math.degrees(placed.rotation))
+            w_pt, h_pt = draw_w * _PX_TO_PT, draw_h * _PX_TO_PT
+            c.drawImage(image, -w_pt / 2, -h_pt / 2, width=w_pt, height=h_pt, mask="auto")
+            c.restoreState()
+        c.showPage()
 
     c.save()
 
     # ------------------------------------------------------------------
-    # 8. Update DB record
+    # 6. Update DB record
     # ------------------------------------------------------------------
     job_store.update_job(job_id, progress=95, stage="Saving result")
     render_job.output_path = output_rel
@@ -295,163 +247,139 @@ def _run(job_id: str, render_id: int, db: Any) -> None:
     db.commit()
 
     job_store.update_job(job_id, status="done", progress=100, stage="Complete")
-    logger.info("Render %d complete — output: %s", render_id, output_rel)
+    logger.info("Render %d complete: %d page(s), output %s", render_id, len(pages), output_rel)
 
 
 # ---------------------------------------------------------------------------
-# Layout helpers
+# Layout (port of frontend/src/lib/layout.ts)
 # ---------------------------------------------------------------------------
 
 
-def _plan_placements(
+def estimate_x_height(glyphs: List[Glyph], fallback: float) -> float:
+    """Median height of the short lowercase letters (``estimateXHeight`` in layout.ts)."""
+    heights = sorted(g.height for g in glyphs if g.accepted and g.char in _X_HEIGHT_CHARS)
+    if not heights:
+        return fallback if fallback > 0 else 32.0
+    mid = len(heights) // 2
+    return heights[mid] if len(heights) % 2 else (heights[mid - 1] + heights[mid]) / 2
+
+
+def layout_text(
     text: str,
-    glyph_map: Dict[str, List[Glyph]],
-    rng: Mulberry32,
-) -> List[Tuple[str, Optional[Glyph]]]:
-    """Map each character in *text* to a randomly selected Glyph variant.
+    glyphs: List[Glyph],
+    settings: Dict[str, Any],
+    profile_x_height: float,
+    seed: int,
+) -> List[List[PlacedGlyph]]:
+    """Lay out *text* into pages of placed glyphs (``layoutText`` in layout.ts)."""
+    rng = Mulberry32(seed)
 
-    Parameters
-    ----------
-    text:
-        Input text string (may include spaces and newlines).
-    glyph_map:
-        Mapping from character to list of available Glyph records.
-    rng:
-        Seeded PRNG for deterministic variant selection.
+    glyph_map: Dict[str, List[Glyph]] = {}
+    for g in glyphs:
+        if g.accepted:
+            glyph_map.setdefault(g.char, []).append(g)
 
-    Returns
-    -------
-    list of (char, Glyph or None)
-        Each element is a ``(character, glyph_or_None)`` pair.  Spaces are
-        represented as ``(" ", None)``.
-    """
-    # Track round-robin counters per character to cycle through variants
-    counters: Dict[str, int] = {}
-    result: List[Tuple[str, Optional[Glyph]]] = []
+    font_size_px = float(settings["font_size"]) * _PT_TO_PX
+    x_height_ref = estimate_x_height(glyphs, profile_x_height)
+    base_scale = font_size_px / x_height_ref
+
+    m_top = float(settings["margin_top"]) * _PX_PER_MM
+    m_bottom = float(settings["margin_bottom"]) * _PX_PER_MM
+    m_left = float(settings["margin_left"]) * _PX_PER_MM
+    m_right = float(settings["margin_right"]) * _PX_PER_MM
+
+    content_width = _PAGE_W_PX - m_left - m_right
+    content_height = _PAGE_H_PX - m_top - m_bottom
+    line_height = font_size_px * float(settings["line_spacing"])
+    mess = float(settings["messiness"]) / 100
+    slant_rad = float(settings["slant_correction"]) * math.pi / 180
+
+    pages: List[List[PlacedGlyph]] = [[]]
+    cur_x = m_left
+    cur_y = m_top + font_size_px
+    word: List[PlacedGlyph] = []
+    word_width = 0.0
+
+    def new_line() -> None:
+        nonlocal cur_x, cur_y
+        cur_x = m_left
+        cur_y += line_height
+        if cur_y > m_top + content_height:
+            pages.append([])
+            cur_y = m_top + font_size_px
+
+    def flush_word() -> None:
+        nonlocal cur_x, word, word_width
+        if not word:
+            return
+        if cur_x + word_width > m_left + content_width and cur_x > m_left:
+            new_line()
+        for placed in word:
+            placed.x += cur_x
+            placed.y += cur_y
+            pages[-1].append(placed)
+        cur_x += word_width
+        word = []
+        word_width = 0.0
 
     for ch in text:
         if ch == "\n":
-            result.append(("\n", None))
+            flush_word()
+            new_line()
             continue
+
         if ch == " ":
-            result.append((" ", None))
+            flush_word()
+            cur_x += base_scale * x_height_ref * 0.45 * (1 + rng.next_range(-0.1, 0.1) * mess)
             continue
 
-        variants = glyph_map.get(ch)
+        variants = glyph_map.get(ch) or glyph_map.get(ch.lower()) or []
         if not variants:
-            result.append((ch, None))
+            word_width += base_scale * x_height_ref * 0.5
             continue
 
-        # Cycle with a PRNG nudge so the sequence is not purely sequential
-        counter = counters.get(ch, 0)
-        nudge = rng.next_int(0, max(0, len(variants) - 1))
-        idx = (counter + nudge) % len(variants)
-        counters[ch] = counter + 1
+        variant = variants[rng.next_int(0, len(variants) - 1)]
+        scale = base_scale * (1 + rng.next_range(-0.03, 0.03) * mess)
+        rotation = slant_rad + rng.next_range(-0.035, 0.035) * mess
+        baseline_wobble = rng.next_range(-1, 1) * mess
 
-        result.append((ch, variants[idx]))
+        word.append(PlacedGlyph(
+            glyph=variant,
+            x=word_width + variant.bearing_left * scale,
+            y=baseline_wobble,
+            scale=scale,
+            rotation=rotation,
+        ))
+        word_width += (variant.bearing_left + variant.width + variant.bearing_right) * scale
 
-    return result
-
-
-def _space_width(font_size_pt: float, glyph_map: Dict[str, List[Glyph]]) -> float:
-    """Estimate the width of a space character.
-
-    Uses the average width of glyphs available in the map scaled to the target
-    font size, multiplied by 0.35 — a common typographic heuristic.
-
-    Parameters
-    ----------
-    font_size_pt:
-        Target font size in points.
-    glyph_map:
-        Mapping from character to Glyph list.
-
-    Returns
-    -------
-    float
-        Estimated space width in points.
-    """
-    if not glyph_map:
-        return font_size_pt * 0.35
-
-    avg_h = sum(g.height for variants in glyph_map.values() for g in variants) / max(
-        sum(len(v) for v in glyph_map.values()), 1
-    )
-    scale = font_size_pt / max(avg_h, 1.0)
-    avg_w = sum(g.width for variants in glyph_map.values() for g in variants) / max(
-        sum(len(v) for v in glyph_map.values()), 1
-    )
-    return avg_w * scale * 0.35
+    flush_word()
+    return pages
 
 
-def _word_wrap(
-    placements: List[Tuple[str, Optional[Glyph]]],
-    text_width: float,
-    font_size_pt: float,
-) -> List[List[Tuple[str, Optional[Glyph]]]]:
-    """Break placements into lines that fit within *text_width*.
-
-    Parameters
-    ----------
-    placements:
-        Ordered list of ``(char, glyph_or_None)`` pairs from
-        :func:`_plan_placements`.
-    text_width:
-        Maximum line width in points.
-    font_size_pt:
-        Target font size used to estimate advance widths.
-
-    Returns
-    -------
-    list of list
-        Each inner list is a line of ``(char, glyph_or_None)`` pairs.
-    """
-    lines: List[List[Tuple[str, Optional[Glyph]]]] = []
-    current_line: List[Tuple[str, Optional[Glyph]]] = []
-    current_x: float = 0.0
-
-    for char, glyph in placements:
-        if char == "\n":
-            lines.append(current_line)
-            current_line = []
-            current_x = 0.0
-            continue
-
-        if glyph is not None and glyph.height > 0:
-            scale = font_size_pt / glyph.height
-            advance = (glyph.width + glyph.bearing_right) * scale
-        else:
-            advance = font_size_pt * 0.6  # fallback advance
-
-        if current_x + advance > text_width and current_line:
-            # Wrap: find last space to break at word boundary
-            break_idx = _last_space(current_line)
-            if break_idx is not None:
-                lines.append(current_line[: break_idx])
-                current_line = current_line[break_idx + 1 :]  # strip the space
-                current_x = sum(
-                    (font_size_pt / max(g.height, 1.0)) * (g.width + g.bearing_right)
-                    if g is not None and g.height > 0
-                    else font_size_pt * 0.6
-                    for _, g in current_line
-                )
-            else:
-                lines.append(current_line)
-                current_line = []
-                current_x = 0.0
-
-        current_line.append((char, glyph))
-        current_x += advance
-
-    if current_line:
-        lines.append(current_line)
-
-    return lines
+# ---------------------------------------------------------------------------
+# Image helpers
+# ---------------------------------------------------------------------------
 
 
-def _last_space(line: List[Tuple[str, Optional[Glyph]]]) -> Optional[int]:
-    """Return the index of the last space in *line*, or ``None``."""
-    for i in range(len(line) - 1, -1, -1):
-        if line[i][0] == " ":
-            return i
-    return None
+def _parse_hex_color(value: str) -> Tuple[int, int, int]:
+    """Parse ``#rrggbb`` into an RGB tuple, falling back to the default ink."""
+    value = value.strip().lstrip("#")
+    if len(value) == 6:
+        try:
+            return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+        except ValueError:
+            pass
+    return 0x1A, 0x1A, 0x2E
+
+
+def _tinted_mask(glyph: Glyph, rgb: Tuple[int, int, int]) -> Optional[ImageReader]:
+    """Load a glyph mask PNG and recolour its ink, keeping the alpha channel."""
+    path = get_file_path(glyph.mask_path)
+    if not path.exists():
+        logger.warning("Glyph mask missing on disk: %s", path)
+        return None
+    with Image.open(path) as im:
+        alpha = im.convert("RGBA").getchannel("A")
+    solid = Image.new("RGBA", alpha.size, rgb + (255,))
+    solid.putalpha(alpha)
+    return ImageReader(solid)

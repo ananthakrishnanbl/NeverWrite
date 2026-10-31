@@ -11,11 +11,25 @@ import {
   Settings,
   Eye,
 } from 'lucide-react'
-import { getGlyphs, getProfile, startRender, Glyph, Profile } from '../lib/api'
+import { getGlyphs, getProfile, profileXHeight, startRender, Glyph, Profile } from '../lib/api'
 import { layoutText, renderToCanvas, LayoutResult } from '../lib/layout'
 import { useInkTwinStore } from '../store'
 
 type MobileTab = 'text' | 'preview' | 'settings'
+
+const DESKTOP_QUERY = '(min-width: 768px)'
+
+/** Tracks the md breakpoint so only one layout (and one canvas) is mounted. */
+function useIsDesktop(): boolean {
+  const [isDesktop, setIsDesktop] = useState(() => window.matchMedia(DESKTOP_QUERY).matches)
+  useEffect(() => {
+    const mql = window.matchMedia(DESKTOP_QUERY)
+    const onChange = () => setIsDesktop(mql.matches)
+    mql.addEventListener('change', onChange)
+    return () => mql.removeEventListener('change', onChange)
+  }, [])
+  return isDesktop
+}
 
 export default function Composer() {
   const { profileId } = useParams<{ profileId: string }>()
@@ -36,6 +50,7 @@ export default function Composer() {
   const [exporting, setExporting] = useState(false)
   const [mobileTab, setMobileTab] = useState<MobileTab>('text')
   const [loadError, setLoadError] = useState<string | null>(null)
+  const isDesktop = useIsDesktop()
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const imageCacheRef = useRef(new Map<string, HTMLImageElement>())
@@ -63,18 +78,19 @@ export default function Composer() {
   // Actually run layout + draw
   useEffect(() => {
     if (!rendering || glyphs.length === 0 || !profile) return
-    const xHeight = profile.metrics?.x_height ?? 32
+    const xHeight = profileXHeight(profile)
     const result = layoutText(composerText, glyphs, renderSettings, xHeight, seed)
     setLayout(result)
     setPageIndex((p) => Math.min(p, Math.max(0, result.pages.length - 1)))
     setRendering(false)
   }, [rendering, glyphs, profile, composerText, renderSettings, seed])
 
-  // Draw to canvas when layout or page changes
+  // Draw to canvas when layout or page changes, or when the canvas remounts
+  // (switching to the mobile Preview tab or across the md breakpoint)
   useEffect(() => {
     if (!layout || !canvasRef.current) return
     renderToCanvas(canvasRef.current, layout, pageIndex, renderSettings, imageCacheRef.current)
-  }, [layout, pageIndex, renderSettings])
+  }, [layout, pageIndex, renderSettings, isDesktop, mobileTab])
 
   const handleExport = async () => {
     if (!profileId || !layout) return
@@ -94,12 +110,16 @@ export default function Composer() {
   const pageCount = layout?.pages.length ?? 1
   const charCount = Array.from(composerText).length
 
+  // These panels are plain JSX, not components declared inside Composer: a
+  // component declared here is a new type on every render, so React would
+  // remount it on each keystroke (textarea loses focus, sliders drop the drag).
+
   // ── Settings panel (shared between desktop right col and mobile tab) ────────
-  const SettingsPanel = () => (
+  const settingsPanel = (
     <div className="space-y-5 overflow-y-auto">
       <Slider label="Font size" unit="pt" value={renderSettings.font_size} min={8} max={24} step={0.5}
         onChange={(v) => updateRenderSettings({ font_size: v })} />
-      <Slider label="Line spacing" unit="×" value={renderSettings.line_spacing} min={0.8} max={2.0} step={0.05}
+      <Slider label="Line spacing" unit="×" value={renderSettings.line_spacing} min={1.5} max={4.0} step={0.05}
         onChange={(v) => updateRenderSettings({ line_spacing: v })} />
 
       {/* Ink color */}
@@ -174,7 +194,7 @@ export default function Composer() {
   )
 
   // ── Canvas panel ──────────────────────────────────────────────────────────
-  const CanvasPanel = () => (
+  const canvasPanel = (
     <div className="flex flex-col h-full">
       {/* Zoom & page nav */}
       <div className="flex items-center justify-between gap-2 mb-3 flex-shrink-0">
@@ -209,7 +229,7 @@ export default function Composer() {
       </div>
 
       {/* Canvas scroll area */}
-      <div className="flex-1 overflow-auto flex items-start justify-center bg-ink-100 rounded-xl relative min-h-0">
+      <div className="flex-1 overflow-auto flex items-start bg-ink-100 rounded-xl relative min-h-0">
         {loadError && (
           <div className="absolute inset-0 flex items-center justify-center text-red-500 text-sm p-4 text-center">{loadError}</div>
         )}
@@ -218,19 +238,32 @@ export default function Composer() {
             <div className="w-6 h-6 border-2 border-ink-300 border-t-ink-700 rounded-full animate-spin" />
           </div>
         )}
-        <div style={{ transform: `scale(${zoom})`, transformOrigin: 'top center', padding: '16px' }}>
-          <canvas
-            ref={canvasRef}
-            className="shadow-xl rounded"
-            style={{ display: 'block', maxWidth: 'none' }}
-          />
+        {/* Size this box to the zoomed page so the scroll area can reach every
+            edge. A bare transform keeps the unscaled size, and centring that
+            pushes the page's left side out of reach. mx-auto centres it only
+            when it fits. */}
+        <div
+          className="mx-auto shrink-0"
+          style={{
+            width: (layout?.pageWidthPx ?? 0) * zoom + 32,
+            height: (layout?.pageHeightPx ?? 0) * zoom + 32,
+            padding: 16,
+          }}
+        >
+          <div style={{ transform: `scale(${zoom})`, transformOrigin: 'top left' }}>
+            <canvas
+              ref={canvasRef}
+              className="shadow-xl rounded"
+              style={{ display: 'block', maxWidth: 'none' }}
+            />
+          </div>
         </div>
       </div>
     </div>
   )
 
   // ── MOBILE layout ─────────────────────────────────────────────────────────
-  const MobileLayout = () => (
+  const mobileLayout = (
     <div className="flex flex-col h-screen md:hidden">
       <div className="flex-1 overflow-hidden p-3">
         {mobileTab === 'text' && (
@@ -247,10 +280,10 @@ export default function Composer() {
             </div>
           </div>
         )}
-        {mobileTab === 'preview' && <CanvasPanel />}
+        {mobileTab === 'preview' && canvasPanel}
         {mobileTab === 'settings' && (
           <div className="h-full overflow-y-auto">
-            <SettingsPanel />
+            {settingsPanel}
           </div>
         )}
       </div>
@@ -287,7 +320,7 @@ export default function Composer() {
   )
 
   // ── DESKTOP layout ────────────────────────────────────────────────────────
-  const DesktopLayout = () => (
+  const desktopLayout = (
     <div className="hidden md:flex h-[calc(100vh-3.5rem)] overflow-hidden">
       {/* Left: text input */}
       <div className="w-72 flex flex-col border-r border-ink-100 p-5 gap-4 flex-shrink-0">
@@ -314,23 +347,18 @@ export default function Composer() {
 
       {/* Center: canvas */}
       <div className="flex-1 p-5 min-w-0 flex flex-col">
-        <CanvasPanel />
+        {canvasPanel}
       </div>
 
       {/* Right: settings */}
       <div className="w-72 border-l border-ink-100 p-5 flex-shrink-0 overflow-y-auto">
         <h2 className="font-semibold text-ink-800 mb-4">Settings</h2>
-        <SettingsPanel />
+        {settingsPanel}
       </div>
     </div>
   )
 
-  return (
-    <>
-      <MobileLayout />
-      <DesktopLayout />
-    </>
-  )
+  return isDesktop ? desktopLayout : mobileLayout
 }
 
 // ── Slider helper ──────────────────────────────────────────────────────────────

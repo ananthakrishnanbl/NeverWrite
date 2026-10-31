@@ -16,8 +16,18 @@ export interface Profile {
   id: number
   name: string
   created_at: string
-  metrics: ProfileMetrics | null
+  metrics_json: string // JSON-encoded ProfileMetrics, "{}" until a sheet is processed
   glyph_count?: number
+}
+
+/** Stored x-height of a profile in glyph pixels, or 0 if unknown. */
+export function profileXHeight(profile: Profile): number {
+  try {
+    const metrics = JSON.parse(profile.metrics_json || '{}') as Partial<ProfileMetrics>
+    return metrics.x_height ?? 0
+  } catch {
+    return 0
+  }
 }
 
 export interface Glyph {
@@ -49,6 +59,7 @@ export interface Job {
   progress: number
   meta: Record<string, unknown>
   error: string | null
+  warning?: string | null
   stage?: string
 }
 
@@ -75,7 +86,7 @@ export interface RenderJob {
   id: number
   profile_id: number
   text: string
-  settings: RenderSettings
+  settings_json: string // JSON-encoded RenderSettings
   seed: number
   status: string
   output_path: string | null
@@ -104,6 +115,10 @@ export async function listProfiles(): Promise<Profile[]> {
 export async function getProfile(id: number): Promise<Profile> {
   const res = await http.get<Profile>(`/profiles/${id}`)
   return res.data
+}
+
+export async function deleteProfile(id: number): Promise<void> {
+  await http.delete(`/profiles/${id}`)
 }
 
 // ─── Scans ────────────────────────────────────────────────────────────────────
@@ -185,7 +200,7 @@ export async function startRender(
   req: RenderRequest
 ): Promise<{ job_id: string; render_id: number }> {
   const res = await http.post<{ job_id: string; render_id: number }>(
-    `/profiles/${profileId}/renders`,
+    `/profiles/${profileId}/render`,
     req
   )
   return res.data
@@ -197,7 +212,7 @@ export async function getRender(renderId: number): Promise<RenderJob> {
 }
 
 export function getRenderFileUrl(renderId: number): string {
-  return `/files/renders/${renderId}/output.pdf`
+  return `/api/renders/${renderId}/file`
 }
 
 // ─── Templates ────────────────────────────────────────────────────────────────

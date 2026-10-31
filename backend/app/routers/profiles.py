@@ -2,16 +2,19 @@
 
 CRUD endpoints for handwriting Profile resources.
 """
+import shutil
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.config import GLYPH_DIR, UPLOAD_DIR
 from app.database import get_db
 from app.models.profile import Profile
 from app.models.glyph import Glyph
+from app.models.render_job import RenderJob
 from app.schemas.profile import ProfileCreate, ProfileRead
-from app.defaults import seed_profile_default_glyphs
+from app.storage import get_file_path
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
 
@@ -23,7 +26,11 @@ router = APIRouter(prefix="/profiles", tags=["profiles"])
     status_code=status.HTTP_201_CREATED,
 )
 def create_profile(body: ProfileCreate, db: Session = Depends(get_db)) -> ProfileRead:
-    """Create a new Profile record and seed it with default sample glyphs.
+    """Create a new, empty Profile record.
+
+    Glyphs only ever come from the person's own scans. Missing characters stay
+    missing (the composer leaves a gap) instead of falling back to a font,
+    which would put typeset letters into supposedly handwritten text.
 
     Parameters
     ----------
@@ -37,11 +44,8 @@ def create_profile(body: ProfileCreate, db: Session = Depends(get_db)) -> Profil
     db.commit()
     db.refresh(profile)
 
-    # Seed profile with default sample glyphs so it is immediately usable
-    glyph_count = seed_profile_default_glyphs(profile.id, db)
-
     result = ProfileRead.model_validate(profile)
-    result.glyph_count = glyph_count
+    result.glyph_count = 0
     return result
 
 
@@ -95,3 +99,36 @@ def get_profile(profile_id: int, db: Session = Depends(get_db)) -> ProfileRead:
     read = ProfileRead.model_validate(profile)
     read.glyph_count = glyph_count
     return read
+
+
+@router.delete(
+    "/{profile_id}",
+    summary="Delete a profile and all of its handwriting data",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_profile(profile_id: int, db: Session = Depends(get_db)) -> None:
+    """Delete a Profile, its glyphs and render jobs, and every file they own.
+
+    Removes the uploaded sheet photos, the glyph masks and any exported PDFs,
+    since handwriting samples are personal data.
+
+    Raises
+    ------
+    HTTPException
+        404 if no Profile with the given ID exists.
+    """
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if profile is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Profile {profile_id} not found.")
+
+    for render_job in db.query(RenderJob).filter(RenderJob.profile_id == profile_id):
+        if render_job.output_path:
+            get_file_path(render_job.output_path).unlink(missing_ok=True)
+    db.query(RenderJob).filter(RenderJob.profile_id == profile_id).delete()
+    db.query(Glyph).filter(Glyph.profile_id == profile_id).delete()
+    db.delete(profile)
+    db.commit()
+
+    shutil.rmtree(GLYPH_DIR / str(profile_id), ignore_errors=True)
+    for upload in UPLOAD_DIR.glob(f"profile_{profile_id}_sheet_*"):
+        upload.unlink(missing_ok=True)

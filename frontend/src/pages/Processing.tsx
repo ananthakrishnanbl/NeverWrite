@@ -3,13 +3,13 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { AlertCircle, CheckCircle } from 'lucide-react'
 import { pollJob, Job } from '../lib/api'
 
+// Keys are the stage names backend/workers/extraction.py reports, in order
 const STAGE_LABELS: Record<string, string> = {
-  upload: 'Uploading scan…',
-  binarize: 'Binarizing image…',
-  segment: 'Segmenting characters…',
-  extract: 'Extracting glyphs…',
-  metrics: 'Analysing handwriting metrics…',
-  finalize: 'Finalizing profile…',
+  'Loading image': 'Loading image…',
+  'Cleaning': 'Cleaning up the photo…',
+  'Extracting cells': 'Finding characters…',
+  'Measuring glyphs': 'Measuring glyphs…',
+  'Building profile metrics': 'Updating profile metrics…',
 }
 
 export default function Processing() {
@@ -24,7 +24,8 @@ export default function Processing() {
       jobId,
       (j) => {
         setJob(j)
-        if (j.status === 'done') {
+        // With a warning, stay here so the person actually reads it
+        if (j.status === 'done' && !j.warning) {
           setTimeout(() => navigate(`/profiles/${profileId}/glyphs`), 800)
         }
         if (j.status === 'error') {
@@ -38,7 +39,9 @@ export default function Processing() {
 
   const progress = job?.progress ?? 0
   const stage = (job?.meta?.stage as string) ?? job?.stage ?? ''
-  const stageLabel = STAGE_LABELS[stage] ?? (job?.status === 'pending' ? 'Queued…' : 'Processing…')
+  const stageLabel = job?.status === 'done'
+    ? 'All characters extracted.'
+    : STAGE_LABELS[stage] ?? (job?.status === 'pending' ? 'Queued…' : 'Processing…')
 
   return (
     <div className="max-w-lg mx-auto px-4 py-20 flex flex-col items-center text-center">
@@ -104,6 +107,18 @@ export default function Processing() {
             })}
           </div>
         </>
+      )}
+
+      {job?.status === 'done' && job.warning && (
+        <div className="mt-8 bg-amber-50 border border-amber-200 rounded-xl p-4 w-full text-left">
+          <p className="text-amber-800 text-sm">{job.warning}</p>
+          <button
+            onClick={() => navigate(`/profiles/${profileId}/glyphs`)}
+            className="mt-3 bg-ink-800 text-paper px-4 py-2 rounded-lg text-sm font-medium hover:bg-ink-700 transition-colors"
+          >
+            Review glyphs
+          </button>
+        </div>
       )}
     </div>
   )
