@@ -2,7 +2,7 @@
 from pathlib import Path
 from typing import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 from app.config import DATA_DIR, DB_PATH, UPLOAD_DIR, GLYPH_DIR, EXPORT_DIR
@@ -49,16 +49,22 @@ def init_db() -> None:
 
     # Create tables
     Base.metadata.create_all(bind=engine)
-    _add_missing_columns()
+    _add_new_columns()
 
 
-def _add_missing_columns() -> None:
-    """Add columns introduced after a database was created.
+# Columns added after the first release. create_all only creates missing
+# tables, so older databases get these through ALTER TABLE.
+_NEW_COLUMNS = {
+    "glyphs": {"issue": "VARCHAR"},
+}
 
-    ``create_all`` only creates missing tables, so an existing data/inktwin.db
-    needs new nullable columns added by hand.
-    """
+
+def _add_new_columns() -> None:
+    """Add any column in ``_NEW_COLUMNS`` that an existing table lacks."""
+    inspector = inspect(engine)
     with engine.begin() as conn:
-        glyph_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(glyphs)")}
-        if "issue" not in glyph_cols:
-            conn.exec_driver_sql("ALTER TABLE glyphs ADD COLUMN issue VARCHAR")
+        for table, columns in _NEW_COLUMNS.items():
+            existing = {col["name"] for col in inspector.get_columns(table)}
+            for name, sql_type in columns.items():
+                if name not in existing:
+                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
