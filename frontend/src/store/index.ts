@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { RenderSettings } from '../lib/api'
 
-interface InkTwinStore {
+interface NeverWriteStore {
   currentProfileId: number | null
   setCurrentProfileId: (id: number) => void
 
@@ -28,7 +28,7 @@ const defaultSettings: RenderSettings = {
   slant_correction: 0,
 }
 
-export const useInkTwinStore = create<InkTwinStore>((set) => ({
+export const useNeverWriteStore = create<NeverWriteStore>((set) => ({
   currentProfileId: null,
   setCurrentProfileId: (id) => set({ currentProfileId: id }),
 
@@ -42,3 +42,4 @@ export const useInkTwinStore = create<InkTwinStore>((set) => ({
   seed: Math.floor(Math.random() * 0xffffffff),
   shuffleSeed: () => set({ seed: Math.floor(Math.random() * 0xffffffff) }),
 }))
+

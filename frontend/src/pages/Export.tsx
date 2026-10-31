@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Download, ArrowLeft, CheckCircle, AlertCircle, FileImage, FileText } from 'lucide-react'
-import { getRender, getRenderFileUrl, RenderJob, RenderSettings } from '../lib/api'
+import { Download, ArrowLeft, CheckCircle, AlertCircle, FileText } from 'lucide-react'
+import { getRender, getRenderFileUrl, getRenderGcodeUrl, RenderJob, RenderSettings } from '../lib/api'
 
 export default function Export() {
   const { profileId, renderId } = useParams<{ profileId: string; renderId: string }>()
@@ -40,6 +40,8 @@ export default function Export() {
   }, [renderId])
 
   const pdfUrl = renderId ? getRenderFileUrl(Number(renderId)) : '#'
+  const gcodeUrl = renderId ? getRenderGcodeUrl(Number(renderId)) : '#'
+  const hasGcode = render?.gcode_path != null
   const settings = parseSettings(render?.settings_json)
 
   return (
@@ -107,6 +109,7 @@ export default function Export() {
 
           {/* Download buttons */}
           <div className="space-y-2">
+            {/* PDF */}
             <a
               href={pdfUrl}
               download
@@ -115,22 +118,38 @@ export default function Export() {
               <FileText className="w-5 h-5" />
               Download PDF
             </a>
-            <button
-              disabled
-              className="flex items-center gap-3 w-full border border-ink-200 text-ink-400 px-5 py-3.5 rounded-xl font-semibold cursor-not-allowed"
-              title="Coming soon"
-            >
-              <FileImage className="w-5 h-5" />
-              Download PNG
-              <span className="ml-auto text-xs bg-ink-100 text-ink-500 px-2 py-0.5 rounded-full">Soon</span>
-            </button>
+
+            {/* G-code */}
+            {hasGcode ? (
+              <a
+                href={gcodeUrl}
+                download
+                className="flex items-center gap-3 w-full bg-indigo-700 text-white px-5 py-3.5 rounded-xl font-semibold hover:bg-indigo-600 transition-colors"
+              >
+                <Download className="w-5 h-5" />
+                Download G-code
+                <span className="ml-auto text-xs bg-indigo-500 text-white px-2 py-0.5 rounded-full">
+                  Pen plotter / CNC
+                </span>
+              </a>
+            ) : (
+              <div className="flex items-center gap-3 w-full border border-ink-200 text-ink-400 px-5 py-3.5 rounded-xl font-semibold cursor-not-allowed select-none">
+                <Download className="w-5 h-5" />
+                G-code unavailable
+                <span className="ml-auto text-xs bg-ink-100 text-ink-500 px-2 py-0.5 rounded-full">
+                  Generation failed
+                </span>
+              </div>
+            )}
+
+            {/* PNG — coming soon */}
             <button
               disabled
               className="flex items-center gap-3 w-full border border-ink-200 text-ink-400 px-5 py-3.5 rounded-xl font-semibold cursor-not-allowed"
               title="Coming soon"
             >
               <Download className="w-5 h-5" />
-              Download SVG
+              Download PNG
               <span className="ml-auto text-xs bg-ink-100 text-ink-500 px-2 py-0.5 rounded-full">Soon</span>
             </button>
           </div>

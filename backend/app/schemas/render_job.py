@@ -23,6 +23,7 @@ class RenderJobRead(BaseModel):
     seed: int
     status: str
     output_path: Optional[str] = None
+    gcode_path: Optional[str] = None
     error: Optional[str] = None
     created_at: datetime
 

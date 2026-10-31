@@ -1,6 +1,6 @@
-# InkTwin (Prototype)
+# NeverWrite (Prototype)
 
-InkTwin digitises personal handwriting from printed template sheets into an individual glyph library, then synthesises realistic handwritten text onto A4 pages using deterministic seeded layout and geometric jitter.
+NeverWrite digitises personal handwriting from printed template sheets into an individual glyph library, then synthesises realistic handwritten text onto A4 pages using deterministic seeded layout and geometric jitter.
 
 ---
 
@@ -16,7 +16,7 @@ InkTwin digitises personal handwriting from printed template sheets into an indi
 ## 📂 Project Structure
 
 ```
-d:\PROTO\inktwin\
+d:\PROTO\NeverWrite\
 ├── backend\
 │   ├── app\
 │   │   ├── config.py         # App directories, SQLite DB path, CORS
@@ -53,7 +53,7 @@ d:\PROTO\inktwin\
 
 1. Open a terminal in `backend`:
    ```powershell
-   cd d:\PROTO\inktwin\backend
+   cd d:\PROTO\NeverWrite\backend
    ```
 2. Install Python dependencies:
    ```powershell
@@ -70,7 +70,7 @@ d:\PROTO\inktwin\
 
 1. Open a second terminal in `frontend`:
    ```powershell
-   cd d:\PROTO\inktwin\frontend
+   cd d:\PROTO\NeverWrite\frontend
    ```
 2. Dependencies are already installed (`node_modules` ready). To start the Vite dev server:
    ```powershell

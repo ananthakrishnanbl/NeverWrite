@@ -6,7 +6,7 @@ BASE_DIR: Path = Path(__file__).parent.parent
 
 # All persistent data lives under data/
 DATA_DIR: Path = BASE_DIR / "data"
-DB_PATH: Path = DATA_DIR / "inktwin.db"
+DB_PATH: Path = DATA_DIR / "neverwrite.db"
 UPLOAD_DIR: Path = DATA_DIR / "uploads"
 GLYPH_DIR: Path = DATA_DIR / "glyphs"
 EXPORT_DIR: Path = DATA_DIR / "exports"

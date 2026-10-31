@@ -109,7 +109,7 @@ export default function TemplateDownload() {
         <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
         <p className="text-sm text-amber-800">
           While PDF download is coming soon, you can still upload scanned images of any hand-drawn character grid.
-          InkTwin will try to auto-detect and extract glyphs.
+          NeverWrite will try to auto-detect and extract glyphs.
         </p>
       </div>
 

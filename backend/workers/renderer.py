@@ -239,7 +239,19 @@ def _run(job_id: str, render_id: int, db: Any) -> None:
     c.save()
 
     # ------------------------------------------------------------------
-    # 6. Update DB record
+    # 6. Generate G-code for pen plotters
+    # ------------------------------------------------------------------
+    job_store.update_job(job_id, progress=80, stage="Generating G-code")
+    try:
+        from workers.gcode_gen import generate_gcode  # local import to avoid circular
+        gcode_rel = generate_gcode(render_id, pages, settings)
+        render_job.gcode_path = gcode_rel
+    except Exception as gcode_exc:
+        logger.warning("G-code generation failed (PDF is still saved): %s", gcode_exc)
+        render_job.gcode_path = None
+
+    # ------------------------------------------------------------------
+    # 7. Update DB record
     # ------------------------------------------------------------------
     job_store.update_job(job_id, progress=95, stage="Saving result")
     render_job.output_path = output_rel
@@ -247,7 +259,10 @@ def _run(job_id: str, render_id: int, db: Any) -> None:
     db.commit()
 
     job_store.update_job(job_id, status="done", progress=100, stage="Complete")
-    logger.info("Render %d complete: %d page(s), output %s", render_id, len(pages), output_rel)
+    logger.info(
+        "Render %d complete: %d page(s), pdf=%s gcode=%s",
+        render_id, len(pages), output_rel, render_job.gcode_path,
+    )
 
 
 # ---------------------------------------------------------------------------

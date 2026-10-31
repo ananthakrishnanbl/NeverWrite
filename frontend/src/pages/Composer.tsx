@@ -13,7 +13,7 @@ import {
 } from 'lucide-react'
 import { getGlyphs, getProfile, profileXHeight, startRender, Glyph, Profile } from '../lib/api'
 import { layoutText, renderToCanvas, LayoutResult } from '../lib/layout'
-import { useInkTwinStore } from '../store'
+import { useNeverWriteStore } from '../store'
 
 type MobileTab = 'text' | 'preview' | 'settings'
 
@@ -39,7 +39,7 @@ export default function Composer() {
     composerText, setComposerText,
     renderSettings, updateRenderSettings,
     seed, shuffleSeed,
-  } = useInkTwinStore()
+  } = useNeverWriteStore()
 
   const [glyphs, setGlyphs] = useState<Glyph[]>([])
   const [profile, setProfile] = useState<Profile | null>(null)

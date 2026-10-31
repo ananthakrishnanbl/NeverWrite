@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { Check, ArrowLeft } from 'lucide-react'
 import { getGlyphs, getProfile, profileXHeight, Glyph, Profile } from '../lib/api'
 import { layoutText, renderToCanvas } from '../lib/layout'
-import { useInkTwinStore } from '../store'
+import { useNeverWriteStore } from '../store'
 
 const PANGRAM = 'The quick brown fox jumps over the lazy dog.'
 
@@ -14,7 +14,7 @@ export default function StylePreview() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const imageCacheRef = useRef(new Map<string, HTMLImageElement>())
-  const { renderSettings, seed } = useInkTwinStore()
+  const { renderSettings, seed } = useNeverWriteStore()
 
   useEffect(() => {
     if (!profileId) return

@@ -87,7 +87,7 @@ export default function Landing() {
               icon: <Camera className="w-6 h-6" />,
               step: '3',
               title: 'Type anything',
-              desc: 'Upload your scans and InkTwin builds a personal font. Now type any text and download it in your own hand.',
+              desc: 'Upload your scans and NeverWrite builds a personal font. Now type any text and download it in your own hand.',
             },
           ].map((card) => (
             <div key={card.step} className="bg-white border border-ink-100 rounded-xl p-6 shadow-sm hover:shadow-md transition-shadow">

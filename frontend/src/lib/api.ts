@@ -90,6 +90,7 @@ export interface RenderJob {
   seed: number
   status: string
   output_path: string | null
+  gcode_path: string | null
   error: string | null
   created_at: string
 }
@@ -213,6 +214,10 @@ export async function getRender(renderId: number): Promise<RenderJob> {
 
 export function getRenderFileUrl(renderId: number): string {
   return `/api/renders/${renderId}/file`
+}
+
+export function getRenderGcodeUrl(renderId: number): string {
+  return `/api/renders/${renderId}/gcode`
 }
 
 // ─── Templates ────────────────────────────────────────────────────────────────

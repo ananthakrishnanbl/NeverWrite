@@ -9,7 +9,7 @@ export default function Layout() {
         <div className="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2 font-semibold text-ink-800 hover:text-ink-600 transition-colors">
             <PenLine className="w-5 h-5" />
-            <span>InkTwin</span>
+            <span>NeverWrite</span>
           </Link>
           <Link
             to="/profiles"
@@ -27,7 +27,7 @@ export default function Layout() {
 
       {/* Footer */}
       <footer className="border-t border-ink-100 py-6 text-center text-sm text-ink-400">
-        © 2024 InkTwin — your handwriting, digitized
+        © 2024 NeverWrite — your handwriting, digitized
       </footer>
     </div>
   )

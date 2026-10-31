@@ -1,4 +1,4 @@
-"""Router: /api/profiles/{id}/render, /api/renders/{id}, /api/renders/{id}/file
+"""Router: /api/profiles/{id}/render, /api/renders/{id}, /api/renders/{id}/file, /api/renders/{id}/gcode
 
 Create render jobs and retrieve their status / output files.
 """
@@ -144,4 +144,57 @@ def get_render_file(render_id: int, db: Session = Depends(get_db)) -> FileRespon
         path=str(abs_path),
         media_type="application/pdf",
         filename=abs_path.name,
+    )
+
+
+@router.get(
+    "/renders/{render_id}/gcode",
+    summary="Download the G-code file for pen plotters",
+)
+def get_render_gcode(render_id: int, db: Session = Depends(get_db)) -> FileResponse:
+    """Stream the G-code output for a completed render job.
+
+    The G-code traces each character's ink contours using G0/G1 moves with
+    M3/M5 (or G1 Z) pen up/down commands, suitable for pen plotters and CNC
+    machines.
+
+    Parameters
+    ----------
+    render_id:
+        Primary key of the RenderJob.
+    db:
+        Injected database session.
+
+    Raises
+    ------
+    HTTPException
+        404 if the RenderJob or G-code file does not exist.
+        409 if the job has not finished successfully or G-code generation failed.
+    """
+    render_job = db.query(RenderJob).filter(RenderJob.id == render_id).first()
+    if render_job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"RenderJob {render_id} not found.")
+    if render_job.status != "done":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"RenderJob {render_id} is not complete yet (status={render_job.status}).",
+        )
+    if render_job.gcode_path is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="G-code was not generated for this render job (generation may have failed).",
+        )
+
+    abs_path = get_file_path(render_job.gcode_path)
+    if not abs_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="G-code file not found on disk — it may have been deleted.",
+        )
+
+    return FileResponse(
+        path=str(abs_path),
+        media_type="text/plain",
+        filename=abs_path.name,
+        headers={"Content-Disposition": f'attachment; filename="{abs_path.name}"'},
     )

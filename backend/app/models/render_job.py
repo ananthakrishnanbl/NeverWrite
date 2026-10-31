@@ -34,6 +34,9 @@ class RenderJob(Base):
     output_path:
         Relative path (from DATA_DIR) to the generated PDF once complete.
         ``None`` until the job finishes successfully.
+    gcode_path:
+        Relative path (from DATA_DIR) to the generated G-code file once complete.
+        ``None`` until the job finishes successfully.
     error:
         Human-readable error message populated when ``status == "error"``.
     created_at:
@@ -49,5 +52,6 @@ class RenderJob(Base):
     seed: int = Column(Integer, nullable=False, default=0)
     status: str = Column(String(16), nullable=False, default="pending")
     output_path: str = Column(String, nullable=True)
+    gcode_path: str = Column(String, nullable=True)
     error: str = Column(String, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)

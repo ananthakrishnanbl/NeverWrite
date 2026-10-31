@@ -1,4 +1,4 @@
-"""Entry point — run with `python run.py` to start the InkTwin API server."""
+"""Entry point — run with `python run.py` to start the NeverWrite API server."""
 import uvicorn
 
 if __name__ == "__main__":
