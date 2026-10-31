@@ -3,3 +3,11 @@ node_modules/
 dist/
 build/
 .DS_Store
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Runtime data: handwriting samples, glyphs, exports and the DB are personal data
+backend/data/
