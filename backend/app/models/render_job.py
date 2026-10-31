@@ -36,6 +36,9 @@ class RenderJob(Base):
         ``None`` until the job finishes successfully.
     error:
         Human-readable error message populated when ``status == "error"``.
+    missing_chars:
+        JSON list of characters in ``text`` with no accepted glyph, which the
+        render leaves as gaps. ``None`` until the layout has run.
     created_at:
         UTC timestamp of record creation.
     """
@@ -50,4 +53,5 @@ class RenderJob(Base):
     status: str = Column(String(16), nullable=False, default="pending")
     output_path: str = Column(String, nullable=True)
     error: str = Column(String, nullable=True)
+    missing_chars: str = Column(String, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)

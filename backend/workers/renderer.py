@@ -196,6 +196,8 @@ def _run(job_id: str, render_id: int, db: Any) -> None:
     # ------------------------------------------------------------------
     job_store.update_job(job_id, progress=30, stage="Planning layout")
     pages = layout_text(render_job.text, glyphs, settings, profile_x_height, render_job.seed)
+    render_job.missing_chars = json.dumps(missing_chars(render_job.text, glyphs))
+    db.commit()
     if is_single_page(settings) and len(pages) > 1:
         raise ValueError(_doesnt_fit_message(settings, "The text"))
 

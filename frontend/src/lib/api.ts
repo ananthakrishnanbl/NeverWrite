@@ -96,6 +96,7 @@ export interface RenderJob {
   status: string
   output_path: string | null
   error: string | null
+  missing_chars: string[] // characters drawn as gaps because they have no glyph
   created_at: string
 }
 
