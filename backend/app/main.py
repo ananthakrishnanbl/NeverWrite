@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.config import CORS_ORIGINS, DATA_DIR
+from app.config import CORS_ORIGINS, GLYPH_DIR
 from app.database import init_db
 from app.routers.templates import router as templates_router
 from app.routers.profiles import router as profiles_router
@@ -50,15 +50,16 @@ def startup() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Static file mount — serves data/ directory for direct image/PDF access
+# Static file mount — serves glyph masks for the browser preview
 # ---------------------------------------------------------------------------
 
-# Mount lazily after startup so DATA_DIR exists
+# Only glyphs/ is public. The DB, the original sheet photos and exports stay
+# behind the API (exports are served by GET /api/renders/{id}/file).
 @app.on_event("startup")
 def mount_static() -> None:
-    """Mount the data directory as a static file server at /files."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    app.mount("/files", StaticFiles(directory=str(DATA_DIR)), name="files")
+    """Mount the glyph directory as a static file server at /files/glyphs."""
+    GLYPH_DIR.mkdir(parents=True, exist_ok=True)
+    app.mount("/files/glyphs", StaticFiles(directory=str(GLYPH_DIR)), name="glyphs")
 
 
 # ---------------------------------------------------------------------------
