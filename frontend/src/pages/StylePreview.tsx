@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Check, ArrowLeft } from 'lucide-react'
-import { getGlyphs, getProfile, Glyph, Profile } from '../lib/api'
+import { getGlyphs, getProfile, profileXHeight, Glyph, Profile } from '../lib/api'
 import { layoutText, renderToCanvas } from '../lib/layout'
 import { useInkTwinStore } from '../store'
 
@@ -23,7 +23,7 @@ export default function StylePreview() {
       .then(async ([glyphs, profile]: [Glyph[], Profile]) => {
         const canvas = canvasRef.current
         if (!canvas) return
-        const xHeight = profile.metrics?.x_height ?? 32
+        const xHeight = profileXHeight(profile)
         const layout = layoutText(PANGRAM, glyphs, renderSettings, xHeight, seed)
         await renderToCanvas(canvas, layout, 0, renderSettings, imageCacheRef.current)
       })

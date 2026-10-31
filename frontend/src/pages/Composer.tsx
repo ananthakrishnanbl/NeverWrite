@@ -11,7 +11,7 @@ import {
   Settings,
   Eye,
 } from 'lucide-react'
-import { getGlyphs, getProfile, startRender, Glyph, Profile } from '../lib/api'
+import { getGlyphs, getProfile, profileXHeight, startRender, Glyph, Profile } from '../lib/api'
 import { layoutText, renderToCanvas, LayoutResult } from '../lib/layout'
 import { useInkTwinStore } from '../store'
 
@@ -63,7 +63,7 @@ export default function Composer() {
   // Actually run layout + draw
   useEffect(() => {
     if (!rendering || glyphs.length === 0 || !profile) return
-    const xHeight = profile.metrics?.x_height ?? 32
+    const xHeight = profileXHeight(profile)
     const result = layoutText(composerText, glyphs, renderSettings, xHeight, seed)
     setLayout(result)
     setPageIndex((p) => Math.min(p, Math.max(0, result.pages.length - 1)))
@@ -99,7 +99,7 @@ export default function Composer() {
     <div className="space-y-5 overflow-y-auto">
       <Slider label="Font size" unit="pt" value={renderSettings.font_size} min={8} max={24} step={0.5}
         onChange={(v) => updateRenderSettings({ font_size: v })} />
-      <Slider label="Line spacing" unit="×" value={renderSettings.line_spacing} min={0.8} max={2.0} step={0.05}
+      <Slider label="Line spacing" unit="×" value={renderSettings.line_spacing} min={1.5} max={4.0} step={0.05}
         onChange={(v) => updateRenderSettings({ line_spacing: v })} />
 
       {/* Ink color */}

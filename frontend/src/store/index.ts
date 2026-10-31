@@ -17,7 +17,7 @@ interface InkTwinStore {
 
 const defaultSettings: RenderSettings = {
   font_size: 12,
-  line_spacing: 1.2,
+  line_spacing: 2.8, // multiple of the x-height; ascenders and descenders need ~2.5×
   ink_color: '#1a1a2e',
   paper_type: 'plain',
   margin_top: 20,
