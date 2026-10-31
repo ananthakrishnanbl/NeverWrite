@@ -17,11 +17,11 @@ from app.routers.jobs import router as jobs_router
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="InkTwin API",
+    title="NeverWrite API",
     description=(
-        "Backend for InkTwin — a handwriting digitisation and synthetic "
-        "handwriting generation system.  Upload scanned template sheets, "
-        "review extracted glyphs, and render personalised handwritten text."
+        "Backend for NeverWrite, which writes cards and envelopes in a "
+        "person's own handwriting. Upload scanned template sheets, review "
+        "extracted glyphs, and render personalised handwritten cards."
     ),
     version="0.1.0",
 )
@@ -84,4 +84,4 @@ app.include_router(jobs_router, prefix=API_PREFIX)
 @app.get("/", tags=["health"])
 def root() -> dict:
     """Health-check endpoint — returns the API name and version."""
-    return {"name": "InkTwin API", "version": "0.1.0", "status": "ok"}
+    return {"name": "NeverWrite API", "version": "0.1.0", "status": "ok"}

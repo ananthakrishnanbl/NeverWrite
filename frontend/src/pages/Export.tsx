@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Download, ArrowLeft, CheckCircle, AlertCircle, FileImage, FileText } from 'lucide-react'
+import { Download, ArrowLeft, CheckCircle, AlertCircle, AlertTriangle, FileImage, FileText } from 'lucide-react'
 import { getRender, getRenderFileUrl, RenderJob, RenderSettings } from '../lib/api'
 
 export default function Export() {
@@ -85,6 +85,8 @@ export default function Export() {
             </div>
           </div>
 
+          {render && render.missing_chars.length > 0 && <MissingChars chars={render.missing_chars} />}
+
           {/* Render info */}
           {render && (
             <div className="bg-white border border-ink-100 rounded-xl p-5 text-sm text-ink-600 space-y-2">
@@ -96,6 +98,12 @@ export default function Export() {
                 <span>Created</span>
                 <span className="font-mono text-ink-800">{new Date(render.created_at).toLocaleString()}</span>
               </div>
+              {settings?.page_width_mm !== undefined && (
+                <div className="flex justify-between">
+                  <span>Size</span>
+                  <span className="font-mono text-ink-800">{settings.page_width_mm} × {settings.page_height_mm} mm</span>
+                </div>
+              )}
               {settings?.font_size !== undefined && (
                 <div className="flex justify-between">
                   <span>Font size</span>
@@ -155,4 +163,17 @@ function parseSettings(json: string | undefined): Partial<RenderSettings> | null
   } catch {
     return null
   }
+}
+
+/** Characters the render drew as gaps because the profile has no glyph for them. */
+export function MissingChars({ chars }: { chars: string[] }) {
+  return (
+    <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex gap-3 text-sm text-amber-800">
+      <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
+      <div>
+        <p className="font-medium">No handwriting for: <span className="font-mono tracking-widest">{chars.join(' ')}</span></p>
+        <p className="text-amber-700">These print as gaps in the PDF.</p>
+      </div>
+    </div>
+  )
 }
