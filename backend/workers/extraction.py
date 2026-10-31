@@ -11,9 +11,9 @@ Stage overview
     raw image when markers are not found).
 3.  Clean / binarise the image (adaptive threshold; cyan-guide suppression is a
     TODO item).
-4.  Divide the image into a character grid (equal-width cells for now; a
-    template-aware layout is a TODO item).
-5.  For each cell: locate ink pixels, measure bounding box and metrics, save
+4.  Group ink components into text rows and characters, then assign the
+    sheet's characters in reading order.
+5.  For each character: measure its bounding box and baseline offset, save
     mask PNG, create Glyph record.
 6.  Compute aggregate profile metrics (median x_height, stroke_w, slant) and
     persist them on the Profile.
@@ -24,7 +24,7 @@ import json
 import logging
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 import cv2
 import numpy as np
@@ -41,40 +41,31 @@ logger = logging.getLogger(__name__)
 # Public pipeline entry point
 # ---------------------------------------------------------------------------
 
-# Default grid layout used when no template metadata is available.
-_DEFAULT_COLS = 10
-_DEFAULT_ROWS = 8
-
 # Character set expected on the standard template (fallback).
 _DEFAULT_CHARSET = (
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
     "0123456789.,!?;:'\"-()"
 )
 
-# Sheet-specific layout configurations.
-# Characters naturally flow across multiple rows (row-major order):
-# E.g. Sheet 1 Lowercase: Row 1 = a..m (13 chars), Row 2 = n..z (13 chars)
-# This ensures letters have plenty of comfortable space on the paper.
+# Sheet-specific character sets, in reading order. The number of rows the
+# person used doesn't matter: rows are found from the ink, and characters are
+# assigned left to right, top to bottom.
 SHEET_CONFIGS: Dict[int, Dict[str, Any]] = {
-    1: {
-        "name": "Lowercase",
-        "rows": 2,
-        "cols": 13,
-        "charset": "abcdefghijklmnopqrstuvwxyz",
-    },
-    2: {
-        "name": "Uppercase",
-        "rows": 2,
-        "cols": 13,
-        "charset": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    },
-    3: {
-        "name": "Digits & Punctuation",
-        "rows": 3,
-        "cols": 10,
-        "charset": "0123456789.,!?;:'\"-()",
-    },
+    1: {"name": "Lowercase", "charset": "abcdefghijklmnopqrstuvwxyz"},
+    2: {"name": "Uppercase", "charset": "ABCDEFGHIJKLMNOPQRSTUVWXYZ"},
+    3: {"name": "Digits & Punctuation", "charset": "0123456789.,!?;:'\"-()"},
 }
+
+# Components smaller than this (or flatter than _MIN_COMPONENT_HEIGHT px) are
+# specks or leftovers of the ruled notebook lines, not ink strokes.
+_MIN_COMPONENT_AREA = 20
+_MIN_COMPONENT_HEIGHT = 4
+
+# Characters whose bottom sits on the baseline; used to locate each row's baseline.
+_ON_BASELINE = set("abcdefhiklmnorstuvwxzABCDEFGHIKLMNOPRSTUVWXYZ0123456789!?:")
+
+# Characters whose height is the x-height (no ascender or descender).
+X_HEIGHT_CHARS = set("acemnorsuvwxz")
 
 
 def run_extraction(
@@ -155,21 +146,21 @@ def _run(
     # Stage 4 & 5 — Extract characters & measure glyphs
     # ------------------------------------------------------------------
     job_store.update_job(job_id, progress=45, stage="Extracting cells")
-    cfg = SHEET_CONFIGS.get(sheet_number, {
-        "rows": _DEFAULT_ROWS,
-        "cols": _DEFAULT_COLS,
-        "charset": _DEFAULT_CHARSET,
-    })
-    rows = cfg["rows"]
-    cols = cfg["cols"]
-    charset = cfg["charset"]
+    charset = SHEET_CONFIGS.get(sheet_number, {"charset": _DEFAULT_CHARSET})["charset"]
 
-    extracted_glyphs = _extract_character_crops(
-        binary=binary,
-        rows=rows,
-        cols=cols,
-        charset=charset,
-    )
+    extracted_glyphs, shapes_found = _extract_character_crops(binary=binary, charset=charset)
+    if not extracted_glyphs:
+        raise ValueError("No handwriting found on this sheet. Check the photo is sharp and well lit.")
+    if shapes_found != len(charset):
+        # Characters are assigned in order, so a miscount shifts everything after it
+        job_store.update_job(
+            job_id,
+            warning=(
+                f"Found {shapes_found} characters but this sheet has {len(charset)}. "
+                "Some glyphs are probably labelled wrong; check them on the review page "
+                "or retake the photo with the characters in the template order."
+            ),
+        )
 
     job_store.update_job(job_id, progress=70, stage="Measuring glyphs")
     metrics_list = _save_extracted_glyphs(
@@ -253,139 +244,130 @@ def _binarise(image: np.ndarray) -> np.ndarray:
 
 def _extract_character_crops(
     binary: np.ndarray,
-    rows: int,
-    cols: int,
     charset: str,
-) -> List[Tuple[str, np.ndarray]]:
-    """Extract individual character crops row by row.
+) -> Tuple[List[Tuple[str, np.ndarray, float]], int]:
+    """Extract individual character crops in reading order.
 
-    Divides the sheet into horizontal row bands, extracts ink components
-    in left-to-right order, and merges multi-stroke characters (e.g. dots on
-    'i', 'j', arms on 'k', crossed strokes on 't', 'x').
+    Rows are found from the ink itself instead of cutting the photo into equal
+    bands, so a descender, an uneven margin or a different number of written
+    rows doesn't push characters into the wrong row.
+
+    1.  Collect ink components and drop specks and ruled-line leftovers.
+    2.  Tall components define the rows: a component joins a row when it
+        overlaps that row vertically by a decent fraction of its height, so a
+        'g' tail that just touches the 't' below stays in its own row.
+    3.  Small marks (dots, commas, colon halves) first join nearby small marks,
+        then go to the row whose core band (median top to median bottom) is
+        closest.
+    4.  Inside each row, horizontally overlapping groups merge into one
+        character ('i' and its dot, the two halves of ':' and '"').
+    5.  ``charset`` is assigned in reading order, and each glyph's baseline
+        offset is measured against its row's baseline.
 
     Parameters
     ----------
     binary:
         Clean binary uint8 image (255 = ink).
-    rows:
-        Expected number of text lines on the sheet (e.g. 2 for lowercase/uppercase).
-    cols:
-        Expected number of characters per line (e.g. 13 for a–m and n–z).
     charset:
-        Ordered string of expected characters in row-major order.
+        Ordered string of expected characters in reading order.
 
     Returns
     -------
-    list of (char, crop_image)
+    (list of (char, crop_image, baseline_offset), number_of_characters_found)
+        ``baseline_offset`` is how far the crop's bottom edge sits below the
+        row baseline in pixels (negative for marks above it, like apostrophes).
     """
     h, w = binary.shape[:2]
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary)
-    # Filter for valid character stroke components
-    comps = [
-        s for s in stats[1:]
-        if s[cv2.CC_STAT_AREA] >= 25
-        and s[cv2.CC_STAT_HEIGHT] >= 10
-        and s[cv2.CC_STAT_WIDTH] >= 5
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
+
+    # Each box is [x1, y1, x2, y2, label_ids]
+    boxes: List[List[Any]] = [
+        [int(s[cv2.CC_STAT_LEFT]), int(s[cv2.CC_STAT_TOP]),
+         int(s[cv2.CC_STAT_LEFT] + s[cv2.CC_STAT_WIDTH]),
+         int(s[cv2.CC_STAT_TOP] + s[cv2.CC_STAT_HEIGHT]), [label]]
+        for label, s in enumerate(stats)
+        if label != 0
+        and s[cv2.CC_STAT_AREA] >= _MIN_COMPONENT_AREA
+        and s[cv2.CC_STAT_HEIGHT] >= _MIN_COMPONENT_HEIGHT
         and s[cv2.CC_STAT_WIDTH] < w * 0.7
+        and s[cv2.CC_STAT_HEIGHT] < h * 0.7
     ]
+    if not boxes:
+        return [], 0
 
-    results: List[Tuple[str, np.ndarray]] = []
-    row_h = h // rows
+    letter_h = float(np.percentile([b[3] - b[1] for b in boxes], 75))
+    gap = 0.3 * letter_h
+    tall = sorted((b for b in boxes if b[3] - b[1] >= 0.5 * letter_h), key=lambda b: b[1])
+    small = [b for b in boxes if b[3] - b[1] < 0.5 * letter_h]
 
-    for r in range(rows):
-        y_min = r * row_h
-        y_max = (r + 1) * row_h
+    # Step 2: rows from tall components
+    rows: List[Dict[str, Any]] = []
+    for b in tall:
+        best, best_overlap = None, 0.0
+        for row in rows:
+            overlap = min(b[3], row["bottom"]) - max(b[1], row["top"])
+            frac = overlap / max(1, min(b[3] - b[1], row["bottom"] - row["top"]))
+            if frac >= 0.3 and frac > best_overlap:
+                best, best_overlap = row, frac
+        if best is None:
+            rows.append({"top": b[1], "bottom": b[3], "boxes": [b]})
+        else:
+            best["top"], best["bottom"] = min(best["top"], b[1]), max(best["bottom"], b[3])
+            best["boxes"].append(b)
+    if not rows:
+        rows.append({"top": 0, "bottom": h, "boxes": []})
+    for row in rows:
+        tops = [b[1] for b in row["boxes"]] or [row["top"]]
+        bottoms = [b[3] for b in row["boxes"]] or [row["bottom"]]
+        row["core"] = (float(np.median(tops)), float(np.median(bottoms)))
 
-        # Get components belonging to this horizontal row band
-        row_comps = [c for c in comps if y_min <= (c[cv2.CC_STAT_TOP] + c[cv2.CC_STAT_HEIGHT] // 2) < y_max]
-        row_comps.sort(key=lambda c: c[cv2.CC_STAT_LEFT])
+    # Step 3: small marks join each other, then the nearest row core
+    small_groups: List[List[Any]] = []
+    for b in sorted(small, key=lambda b: (b[1], b[0])):
+        for g in small_groups:
+            if b[0] <= g[2] + gap and g[0] <= b[2] + gap and b[1] <= g[3] + gap and g[1] <= b[3] + gap:
+                g[:4] = [min(g[0], b[0]), min(g[1], b[1]), max(g[2], b[2]), max(g[3], b[3])]
+                g[4] = g[4] + b[4]
+                break
+        else:
+            small_groups.append(list(b))
+    for g in small_groups:
+        cy = (g[1] + g[3]) / 2
+        dist = [max(row["core"][0] - cy, cy - row["core"][1], 0.0) for row in rows]
+        rows[int(np.argmin(dist))]["boxes"].append(g)
 
-        # Merge closely adjacent or overlapping components (multi-stroke characters)
-        merged: List[List[int]] = []
-        merge_dist = max(18, int(w / (cols * 5)))
-
-        for c in row_comps:
-            x, y, cw, ch = c[cv2.CC_STAT_LEFT], c[cv2.CC_STAT_TOP], c[cv2.CC_STAT_WIDTH], c[cv2.CC_STAT_HEIGHT]
-            if not merged:
-                merged.append([x, y, x + cw, y + ch])
+    # Step 4: merge horizontally overlapping groups inside each row
+    rows.sort(key=lambda r: sum(r["core"]) / 2)
+    shapes: List[Tuple[int, List[Any]]] = []
+    for row_idx, row in enumerate(rows):
+        merged: List[List[Any]] = []
+        for b in sorted(row["boxes"], key=lambda b: b[0]):
+            if merged and b[0] <= merged[-1][2] + gap:
+                m = merged[-1]
+                merged[-1] = [min(m[0], b[0]), min(m[1], b[1]), max(m[2], b[2]), max(m[3], b[3]), m[4] + b[4]]
             else:
-                prev = merged[-1]
-                if x <= prev[2] + merge_dist:
-                    merged[-1] = [min(prev[0], x), min(prev[1], y), max(prev[2], x + cw), max(prev[3], y + ch)]
-                else:
-                    merged.append([x, y, x + cw, y + ch])
+                merged.append(list(b))
+        shapes.extend((row_idx, m) for m in merged)
 
-        chars_for_row = charset[r * cols : (r + 1) * cols]
+    # Step 5: assign characters in reading order and measure baselines
+    pairs = list(zip(charset, shapes))
+    baselines: Dict[int, float] = {}
+    for row_idx in range(len(rows)):
+        bottoms = [m[3] for ch, (r, m) in pairs if r == row_idx and ch in _ON_BASELINE]
+        if not bottoms:
+            bottoms = [m[3] for r, m in shapes if r == row_idx]
+        baselines[row_idx] = float(np.median(bottoms)) if bottoms else 0.0
 
-        for c_idx, box in enumerate(merged[:len(chars_for_row)]):
-            ch = chars_for_row[c_idx]
-            x1, y1, x2, y2 = box
-            px1 = max(0, x1 - 2)
-            py1 = max(0, y1 - 2)
-            px2 = min(w, x2 + 2)
-            py2 = min(h, y2 + 2)
-            crop = binary[py1:py2, px1:px2].copy()
-            if crop.shape[0] > 0 and crop.shape[1] > 0:
-                results.append((ch, crop))
+    results: List[Tuple[str, np.ndarray, float]] = []
+    for ch, (row_idx, (x1, y1, x2, y2, ids)) in pairs:
+        px1, py1 = max(0, x1 - 2), max(0, y1 - 2)
+        px2, py2 = min(w, x2 + 2), min(h, y2 + 2)
+        # Keep only this character's own components, not ink from neighbours
+        crop = np.where(np.isin(labels[py1:py2, px1:px2], ids), 255, 0).astype(np.uint8)
+        if crop.shape[0] > 0 and crop.shape[1] > 0:
+            results.append((ch, crop, float(py2) - baselines[row_idx]))
 
-    # Fallback to naive grid if components were not detected
-    if len(results) < len(charset) // 3:
-        results = []
-        cell_h = h // rows
-        cell_w = w // cols
-        idx = 0
-        for r in range(rows):
-            for c in range(cols):
-                if idx >= len(charset):
-                    break
-                ch = charset[idx]
-                idx += 1
-                y0 = r * cell_h
-                y1 = y0 + cell_h
-                x0 = c * cell_w
-                x1 = x0 + cell_w
-                cell = binary[y0:y1, x0:x1]
-                bbox = _ink_bounding_box(cell)
-                if bbox is not None:
-                    bx, by, bw, bh = bbox
-                    tight = cell[by:by + bh, bx:bx + bw].copy()
-                    results.append((ch, tight))
-
-    return results
-
-    # Fallback to naive grid if line detection found too few characters
-    if len(results) < len(charset) // 3:
-        results = []
-        cell_h = h // rows
-        cell_w = w // cols
-        idx = 0
-        for r in range(rows):
-            for c in range(cols):
-                if idx >= len(charset):
-                    break
-                ch = charset[idx]
-                idx += 1
-                y0 = r * cell_h
-                y1 = y0 + cell_h
-                x0 = c * cell_w
-                x1 = x0 + cell_w
-                cell = binary[y0:y1, x0:x1]
-                bbox = _ink_bounding_box(cell)
-                if bbox is not None:
-                    bx, by, bw, bh = bbox
-                    tight = cell[by:by + bh, bx:bx + bw].copy()
-                    results.append((ch, tight))
-
-    return results
-
-
-def _ink_bounding_box(cell: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
-    """Return the tight bounding box of ink pixels in a cell, or None if empty."""
-    coords = cv2.findNonZero(cell)
-    if coords is None:
-        return None
-    x, y, bw, bh = cv2.boundingRect(coords)
-    return (x, y, bw, bh)
+    return results, len(shapes)
 
 
 def _estimate_stroke_width(cell: np.ndarray) -> float:
@@ -402,19 +384,15 @@ def _estimate_stroke_width(cell: np.ndarray) -> float:
     return float(np.median(values) * 2.0)
 
 
-# Set of characters that drop below the typographic baseline
-DESCENDERS = set("gjpqy,;")
-
-
 def _save_extracted_glyphs(
-    extracted_glyphs: List[Tuple[str, np.ndarray]],
+    extracted_glyphs: List[Tuple[str, np.ndarray, float]],
     profile_id: int,
     db: Any,
 ) -> List[Dict[str, float]]:
     """Measure extracted glyph crops, save mask PNGs, and update DB records."""
     metrics_list: List[Dict[str, float]] = []
 
-    for char, mask_crop in extracted_glyphs:
+    for char, mask_crop, baseline_offset in extracted_glyphs:
         bh, bw = mask_crop.shape[:2]
         if bh == 0 or bw == 0:
             continue
@@ -440,12 +418,6 @@ def _save_extracted_glyphs(
         )
 
         stroke_w = _estimate_stroke_width(mask_crop)
-
-        # Baseline offset: descenders hang below the baseline
-        if char in DESCENDERS:
-            baseline_offset = float(bh * 0.35)
-        else:
-            baseline_offset = 0.0
 
         bearing_left = 3.0
         bearing_right = 3.0
@@ -481,7 +453,6 @@ def _save_extracted_glyphs(
             db.add(glyph)
 
         metrics_list.append({
-            "x_height": float(bh),
             "stroke_w": stroke_w,
             "slant": 0.0,
         })
@@ -510,7 +481,6 @@ def _update_profile_metrics(
     if profile is None or not metrics_list:
         return
 
-    x_heights = [m["x_height"] for m in metrics_list]
     stroke_ws = [m["stroke_w"] for m in metrics_list]
     slants = [m["slant"] for m in metrics_list]
 
@@ -520,9 +490,17 @@ def _update_profile_metrics(
     except json.JSONDecodeError:
         existing = {}
 
+    # x-height comes from every short lowercase letter in the profile, not just
+    # this sheet, so uploading the digits sheet last doesn't change it
+    x_heights = [
+        g.height
+        for g in db.query(Glyph).filter(Glyph.profile_id == profile_id, Glyph.accepted == True)  # noqa: E712
+        if g.char in X_HEIGHT_CHARS
+    ]
+
     updated_metrics = {
         **existing,
-        "x_height": float(np.median(x_heights)),
+        "x_height": float(np.median(x_heights)) if x_heights else existing.get("x_height", 0.0),
         "stroke_w": float(np.median(stroke_ws)),
         "slant": float(np.median(slants)),
         "avg_char_gap": existing.get("avg_char_gap", 0.0),  # TODO: measure inter-glyph gaps

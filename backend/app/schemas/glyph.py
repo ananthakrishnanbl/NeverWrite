@@ -33,4 +33,4 @@ class GlyphUpdate(BaseModel):
     accepted: Optional[bool] = Field(default=None, description="Set to false to exclude glyph from renders.")
     bearing_left: Optional[float] = Field(default=None, description="Left side-bearing in pixels.")
     bearing_right: Optional[float] = Field(default=None, description="Right side-bearing in pixels.")
-    baseline_offset: Optional[float] = Field(default=None, description="Distance from top of bounding box to baseline.")
+    baseline_offset: Optional[float] = Field(default=None, description="Pixels the bottom of the mask sits below the baseline (negative = above).")
