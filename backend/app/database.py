@@ -41,7 +41,7 @@ def get_db() -> Generator[Session, None, None]:
 def init_db() -> None:
     """Create all tables and required data subdirectories if they don't exist."""
     # Import models so that Base knows about them before create_all
-    from app.models import profile, glyph, render_job  # noqa: F401
+    from app.models import profile, glyph, render_job, render_batch  # noqa: F401
 
     # Ensure the data directories exist
     for directory in (DATA_DIR, UPLOAD_DIR, GLYPH_DIR, EXPORT_DIR):

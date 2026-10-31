@@ -1,7 +1,8 @@
 """Handwriting page renderer using ReportLab.
 
-Takes a RenderJob from the database, loads the associated Profile's accepted
-glyphs, and composites them into a PDF page that mimics natural handwriting.
+Takes a RenderJob (one text) or a RenderBatch (a mail-merged set of cards)
+from the database, loads the associated Profile's accepted glyphs, and
+composites them into PDF pages that mimic natural handwriting.
 
 The layout is a line-for-line port of ``layoutText`` in
 ``frontend/src/lib/layout.ts``: same units, same settings, and the same order
@@ -10,9 +11,12 @@ in the exported PDF. Change both files together.
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import math
+import re
+import zipfile
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -24,6 +28,7 @@ from app import jobs as job_store
 from app.config import EXPORT_DIR
 from app.models.glyph import Glyph
 from app.models.profile import Profile
+from app.models.render_batch import RenderBatch
 from app.models.render_job import RenderJob
 from app.storage import get_file_path
 
@@ -140,6 +145,11 @@ def run_render(job_id: str, render_id: int, db_session_factory) -> None:
     _run_guarded(job_id, render_id, db_session_factory, RenderJob, _run)
 
 
+def run_batch(job_id: str, batch_id: int, db_session_factory) -> None:
+    """Execute the render pipeline for a RenderBatch (same contract as :func:`run_render`)."""
+    _run_guarded(job_id, batch_id, db_session_factory, RenderBatch, _run_batch)
+
+
 def _run_guarded(
     job_id: str,
     record_id: int,
@@ -225,6 +235,71 @@ def _run(job_id: str, render_id: int, db: Any) -> None:
     logger.info("Render %d complete: %d page(s), output %s", render_id, len(pages), render_job.output_path)
 
 
+def _run_batch(job_id: str, batch_id: int, db: Any) -> None:
+    """Internal render pipeline for a mail-merged batch of cards.
+
+    Writes one PDF with every card (one card per page for card sizes) and a
+    zip with a separate PDF per card. Each card keeps its own text and seed in
+    ``cards_json``, so any card can be regenerated exactly.
+    """
+    job_store.update_job(job_id, status="running", progress=5, stage="Loading batch")
+    batch: Optional[RenderBatch] = db.query(RenderBatch).filter(RenderBatch.id == batch_id).first()
+    if batch is None:
+        raise ValueError(f"RenderBatch {batch_id} not found in database.")
+
+    batch.status = "running"
+    db.commit()
+
+    glyphs, settings, profile_x_height = _load_inputs(db, batch.profile_id, batch.settings_json)
+    cards: List[Dict[str, Any]] = json.loads(batch.cards_json or "[]")
+
+    # Lay out every card first, so a card that doesn't fit stops the batch
+    # before any file is written
+    job_store.update_job(job_id, progress=15, stage="Planning layout")
+    layouts: List[List[List[PlacedGlyph]]] = []
+    too_long: List[int] = []
+    for number, card in enumerate(cards, start=1):
+        pages = layout_text(card["text"], glyphs, settings, profile_x_height, int(card["seed"]))
+        card["missing_chars"] = missing_chars(card["text"], glyphs)
+        if is_single_page(settings) and len(pages) > 1:
+            too_long.append(number)
+        layouts.append(pages)
+    batch.cards_json = json.dumps(cards)
+    db.commit()
+    if too_long:
+        which = "Card " if len(too_long) == 1 else "Cards "
+        raise ValueError(_doesnt_fit_message(settings, which + ", ".join(map(str, too_long))))
+
+    job_store.update_job(job_id, progress=30, stage="Rendering PDF")
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    stem = f"batch_{batch_id}"
+    painter = _PdfPainter(settings)
+    combined = painter.canvas(str(EXPORT_DIR / f"{stem}.pdf"))
+    with zipfile.ZipFile(EXPORT_DIR / f"{stem}.zip", "w", zipfile.ZIP_DEFLATED) as zf:
+        for number, (card, pages) in enumerate(zip(cards, layouts), start=1):
+            painter.draw(combined, pages)
+
+            single = io.BytesIO()
+            c = painter.canvas(single)
+            painter.draw(c, pages)
+            c.save()
+            # A fixed timestamp keeps the zip as reproducible as the PDFs
+            info = zipfile.ZipInfo(_card_filename(number, str(card.get("label", ""))), date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zf.writestr(info, single.getvalue())
+
+            job_store.update_job(job_id, progress=30 + int(65 * number / len(cards)))
+    combined.save()
+
+    batch.output_path = f"exports/{stem}.pdf"
+    batch.zip_path = f"exports/{stem}.zip"
+    batch.status = "done"
+    db.commit()
+
+    job_store.update_job(job_id, status="done", progress=100, stage="Complete")
+    logger.info("Batch %d complete: %d card(s), output %s", batch_id, len(cards), batch.output_path)
+
+
 def _load_inputs(db: Any, profile_id: int, settings_json: Optional[str]) -> Tuple[List[Glyph], Dict[str, Any], float]:
     """Load a profile's glyphs and x-height, and parse the render settings.
 
@@ -263,6 +338,12 @@ def _doesnt_fit_message(settings: Dict[str, Any], subject: str) -> str:
         f"{subject} doesn't fit on one {label}. Shorten the text, lower the "
         "font size, line spacing or margins, or pick a bigger size."
     )
+
+
+def _card_filename(number: int, label: str) -> str:
+    """File name for one card in the zip, such as ``card_03_Meera.pdf``."""
+    slug = re.sub(r"[^\w]+", "-", label).strip("-_")[:40]
+    return f"card_{number:02d}_{slug}.pdf" if slug else f"card_{number:02d}.pdf"
 
 
 # ---------------------------------------------------------------------------

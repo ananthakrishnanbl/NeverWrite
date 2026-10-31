@@ -100,6 +100,28 @@ export interface RenderJob {
   created_at: string
 }
 
+export interface BatchCard {
+  label: string
+  text: string
+  seed: number
+}
+
+export interface RenderBatchCard extends BatchCard {
+  missing_chars: string[]
+}
+
+export interface RenderBatch {
+  id: number
+  profile_id: number
+  settings_json: string // JSON-encoded RenderSettings
+  cards: RenderBatchCard[]
+  status: string
+  output_path: string | null
+  zip_path: string | null
+  error: string | null
+  created_at: string
+}
+
 export interface TemplateInfo {
   sheet_number: number
   characters: string[]
@@ -219,6 +241,27 @@ export async function getRender(renderId: number): Promise<RenderJob> {
 
 export function getRenderFileUrl(renderId: number): string {
   return `/api/renders/${renderId}/file`
+}
+
+/** Render every card into one PDF (a page per card) plus a zip of single-card PDFs. */
+export async function startBatch(
+  profileId: number,
+  req: { settings: RenderSettings; cards: BatchCard[] }
+): Promise<{ job_id: string; batch_id: number }> {
+  const res = await http.post<{ job_id: string; batch_id: number }>(
+    `/profiles/${profileId}/render-batch`,
+    req
+  )
+  return res.data
+}
+
+export async function getBatch(batchId: number): Promise<RenderBatch> {
+  const res = await http.get<RenderBatch>(`/render-batches/${batchId}`)
+  return res.data
+}
+
+export function getBatchFileUrl(batchId: number, kind: 'pdf' | 'zip'): string {
+  return `/api/render-batches/${batchId}/${kind === 'pdf' ? 'file' : 'zip'}`
 }
 
 // ─── Templates ────────────────────────────────────────────────────────────────
