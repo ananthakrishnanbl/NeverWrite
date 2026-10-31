@@ -9,7 +9,7 @@ class RenderJobCreate(BaseModel):
     """Request body for POST /profiles/{id}/render."""
 
     text: str = Field(..., min_length=1, description="Plain text to render in the target handwriting style.")
-    settings: Dict[str, Any] = Field(default_factory=dict, description="Render settings (font_size, line_spacing, ink_color, margins, paper_type).")
+    settings: Dict[str, Any] = Field(default_factory=dict, description="Render settings in the frontend RenderSettings shape (font_size, line_spacing, ink_color, margin_*, messiness, slant_correction).")
     seed: int = Field(default=0, description="PRNG seed for reproducible renders.")
 
 
