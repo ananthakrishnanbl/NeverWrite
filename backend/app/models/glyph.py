@@ -42,6 +42,9 @@ class Glyph(Base):
     accepted:
         Whether this glyph has been approved for use in rendering.  Defaults
         to ``True``; the user can reject bad extractions via the API.
+    issue:
+        Why extraction held this glyph back for review (for example ink
+        touching the box edge), or ``None`` when nothing looked wrong.
     """
 
     __tablename__ = "glyphs"
@@ -58,3 +61,4 @@ class Glyph(Base):
     bearing_left: float = Column(Float, nullable=False, default=0.0)
     bearing_right: float = Column(Float, nullable=False, default=0.0)
     accepted: bool = Column(Boolean, nullable=False, default=True)
+    issue: str = Column(String, nullable=True)

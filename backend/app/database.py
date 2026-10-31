@@ -49,3 +49,16 @@ def init_db() -> None:
 
     # Create tables
     Base.metadata.create_all(bind=engine)
+    _add_missing_columns()
+
+
+def _add_missing_columns() -> None:
+    """Add columns introduced after a database was created.
+
+    ``create_all`` only creates missing tables, so an existing data/inktwin.db
+    needs new nullable columns added by hand.
+    """
+    with engine.begin() as conn:
+        glyph_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(glyphs)")}
+        if "issue" not in glyph_cols:
+            conn.exec_driver_sql("ALTER TABLE glyphs ADD COLUMN issue VARCHAR")
