@@ -159,6 +159,10 @@ def run_extraction(
     db = db_session_factory()
     try:
         _run(job_id, scan_path, profile_id, sheet_number, db)
+    except SheetError as exc:
+        # A problem with the photo, explained to the person; not a crash
+        logger.info("Extraction for job %s stopped: %s", job_id, exc)
+        job_store.update_job(job_id, status="error", error=str(exc))
     except Exception as exc:
         logger.exception("Extraction pipeline failed for job %s", job_id)
         job_store.update_job(job_id, status="error", error=str(exc))
