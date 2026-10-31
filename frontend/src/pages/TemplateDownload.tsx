@@ -1,42 +1,27 @@
-import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Download, PenLine, Check, AlertCircle } from 'lucide-react'
+import { Download, PenLine, Check, Info } from 'lucide-react'
+import { SHEETS, VARIANTS_PER_CHAR, templatePdfUrl } from '../lib/sheets'
 
-const SHEETS = [
-  {
-    sheet: 1,
-    title: 'Sheet 1 — Lowercase (a–z)',
-    chars: 'Row 1: a b c d e f g h i j k l m  |  Row 2: n o p q r s t u v w x y z',
-    desc: '2 rows × 13 columns. Plenty of space to write naturally without squeezing.',
-  },
-  {
-    sheet: 2,
-    title: 'Sheet 2 — Uppercase (A–Z)',
-    chars: 'Row 1: A B C D E F G H I J K L M  |  Row 2: N O P Q R S T U V W X Y Z',
-    desc: '2 rows × 13 columns. Generous cell dimensions.',
-  },
-  {
-    sheet: 3,
-    title: 'Sheet 3 — Digits & Punctuation',
-    chars: 'Row 1: 0 1 2 3 4 5 6 7 8 9  |  Row 2 & 3: . , ! ? ; : \' " - ( )',
-    desc: 'Numbers and common punctuation marks.',
-  },
-]
+const SHEET_TITLES: Record<number, string> = {
+  1: 'Sheet 1: Lowercase (a to z)',
+  2: 'Sheet 2: Uppercase (A to Z)',
+  3: 'Sheet 3: Digits & Punctuation',
+}
 
 const TIPS = [
-  'Use a consistent pen — ballpoint or rollerball works best.',
-  'Write at your natural size; do not try to fit within the boxes exactly.',
-  'Maintain your normal slant and speed for authentic results.',
-  'Ensure good lighting when scanning; avoid shadows.',
-  'Scan or photograph at least 300 dpi for best extraction quality.',
-  'Only one sample per character is needed. If you rescan, it replaces that character.',
+  'Print at 100% size on plain white A4 paper. Colour printing is best, but black and white works too.',
+  'Use a dark pen: black or dark blue ballpoint, gel or fountain pen. Pencil is too faint to pick up.',
+  `Write each character ${VARIANTS_PER_CHAR} times, once per box, sitting on the solid blue line. Let them differ a little, the way your writing naturally does.`,
+  'Write at your everyday size and keep each letter inside its box. Ink that touches the box edge gets flagged for review.',
+  'Scan the sheet, or photograph it from straight above in good light with all four black corner squares in the picture.',
+  'Upload the original file. If the photo is on your phone, send it as a document or by cable; a photo sent as a chat image is compressed and loses the detail of your strokes.',
+  'Rescanning a sheet only replaces the boxes you filled in, so you can redo a few characters on a fresh copy.',
 ]
 
 export default function TemplateDownload() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const profileId = searchParams.get('profileId')
-  const [tooltip, setTooltip] = useState<number | null>(null)
 
   const handleContinue = () => {
     if (profileId) {
@@ -58,31 +43,25 @@ export default function TemplateDownload() {
       {/* Sheet cards */}
       <div className="space-y-4 mb-12">
         {SHEETS.map((s) => (
-          <div key={s.sheet} className="bg-white border border-ink-100 rounded-xl p-6 shadow-sm">
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex-1">
-                <h2 className="font-semibold text-ink-800 mb-1">{s.title}</h2>
-                <p className="text-sm text-ink-500 mb-3">{s.desc}</p>
-                <div className="bg-ink-50 rounded-lg px-4 py-3 font-mono text-ink-700 text-sm tracking-widest">
-                  {s.chars}
+          <div key={s.number} className="bg-white border border-ink-100 rounded-xl p-6 shadow-sm">
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+              <div className="flex-1 min-w-0">
+                <h2 className="font-semibold text-ink-800 mb-1">{SHEET_TITLES[s.number]}</h2>
+                <p className="text-sm text-ink-500 mb-3">
+                  {s.charset.length} characters, {VARIANTS_PER_CHAR} boxes each, on one A4 page.
+                </p>
+                <div className="bg-ink-50 rounded-lg px-4 py-3 font-mono text-ink-700 text-sm tracking-widest break-all">
+                  {Array.from(s.charset).join(' ')}
                 </div>
               </div>
-              <div className="relative">
-                <button
-                  onMouseEnter={() => setTooltip(s.sheet)}
-                  onMouseLeave={() => setTooltip(null)}
-                  className="flex items-center gap-2 border border-ink-200 text-ink-500 px-4 py-2 rounded-lg text-sm cursor-not-allowed hover:bg-ink-50 transition-colors"
-                  disabled
-                >
-                  <Download className="w-4 h-4" />
-                  Download PDF
-                </button>
-                {tooltip === s.sheet && (
-                  <div className="absolute right-0 top-full mt-2 bg-ink-800 text-paper text-xs rounded-lg px-3 py-2 whitespace-nowrap z-10">
-                    Coming soon
-                  </div>
-                )}
-              </div>
+              <a
+                href={templatePdfUrl(s.number)}
+                download
+                className="flex items-center justify-center gap-2 bg-ink-800 text-paper px-4 py-2 rounded-lg text-sm font-medium hover:bg-ink-700 transition-colors shrink-0"
+              >
+                <Download className="w-4 h-4" />
+                Download PDF
+              </a>
             </div>
           </div>
         ))}
@@ -105,11 +84,11 @@ export default function TemplateDownload() {
       </div>
 
       {/* Notice */}
-      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex gap-3 mb-8">
-        <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-        <p className="text-sm text-amber-800">
-          While PDF download is coming soon, you can still upload scanned images of any hand-drawn character grid.
-          InkTwin will try to auto-detect and extract glyphs.
+      <div className="bg-ink-50 border border-ink-100 rounded-xl p-4 flex gap-3 mb-8">
+        <Info className="w-5 h-5 text-ink-500 shrink-0 mt-0.5" />
+        <p className="text-sm text-ink-600">
+          A hand-drawn sheet without the corner squares still works, but then characters are read in order with
+          one sample each, so a missed or extra mark shifts the labels. The printed sheets avoid that.
         </p>
       </div>
 

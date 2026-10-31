@@ -6,6 +6,7 @@ import { pollJob, Job } from '../lib/api'
 // Keys are the stage names backend/workers/extraction.py reports, in order
 const STAGE_LABELS: Record<string, string> = {
   'Loading image': 'Loading image…',
+  'Detecting markers': 'Finding the corner squares…',
   'Cleaning': 'Cleaning up the photo…',
   'Extracting cells': 'Finding characters…',
   'Measuring glyphs': 'Measuring glyphs…',

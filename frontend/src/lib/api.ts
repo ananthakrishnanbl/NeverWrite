@@ -43,6 +43,7 @@ export interface Glyph {
   bearing_left: number
   bearing_right: number
   accepted: boolean
+  issue?: string | null // why extraction held this variant back for review
 }
 
 export interface GlyphPatch {

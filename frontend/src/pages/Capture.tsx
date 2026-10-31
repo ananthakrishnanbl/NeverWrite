@@ -1,5 +1,5 @@
 import { useState, useRef, DragEvent, ChangeEvent, useEffect } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { Upload, ImageIcon, Check, X, ArrowRight } from 'lucide-react'
 import { uploadScan, getGlyphs } from '../lib/api'
 
@@ -12,7 +12,12 @@ const SHEETS = [
 export default function Capture() {
   const { profileId } = useParams<{ profileId: string }>()
   const navigate = useNavigate()
-  const [activeSheet, setActiveSheet] = useState(1)
+  const [searchParams] = useSearchParams()
+  // Glyph Review links here with ?sheet=N to redo part of a sheet
+  const [activeSheet, setActiveSheet] = useState(() => {
+    const n = Number(searchParams.get('sheet'))
+    return SHEETS.some((s) => s.number === n) ? n : 1
+  })
   
   // Keep file & preview state persistent per sheet number so switching sheets does NOT wipe images
   const [sheetFiles, setSheetFiles] = useState<Record<number, File | null>>({})
@@ -99,6 +104,10 @@ export default function Capture() {
         <div>
           <h1 className="text-3xl font-bold text-ink-900 mb-2">Upload Handwriting Scans</h1>
           <p className="text-ink-500">Upload clean photos or scans of your handwritten sheets.</p>
+          <p className="text-sm text-ink-400 mt-1">
+            Keep all four corner squares in the picture, and upload the original file rather than a copy sent
+            through a chat app.
+          </p>
         </div>
         {hasExistingGlyphs && (
           <button
