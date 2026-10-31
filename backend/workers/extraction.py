@@ -2,71 +2,133 @@
 
 This module is executed in a background daemon thread for every uploaded scan.
 It progresses through a series of computer-vision stages and writes Glyph
-records to the database as characters are located on the sheet.
+records to the database for the characters found on the sheet.
 
 Stage overview
 --------------
-1.  Load image with OpenCV.
-2.  Detect ArUco markers and rectify perspective (stubbed — falls back to the
-    raw image when markers are not found).
-3.  Clean / binarise the image (adaptive threshold; cyan-guide suppression is a
-    TODO item).
-4.  Group ink components into text rows and characters, then assign the
-    sheet's characters in reading order.
-5.  For each character: measure its bounding box and baseline offset, save
-    mask PNG, create Glyph record.
-6.  Compute aggregate profile metrics (median x_height, stroke_w, slant) and
-    persist them on the Profile.
+1.  Load the photo.
+2.  Detect the four ArUco corner markers of the printed template. Their ids
+    say which sheet this is, so a photo of a different sheet than the one
+    chosen is rejected.
+3.  Warp the sheet onto the template's coordinates (``PX_PER_MM`` pixels per
+    millimetre) and read every box by its known position, which gives the
+    character and the variant directly. The printed baseline in each box is
+    located to correct small misregistration and sets ``baseline_offset``.
+4.  Turn ink darkness into a soft alpha mask, so anti-aliasing and the pen's
+    texture survive. The light cyan guides drop out by colour (or by
+    lightness on a black-and-white print). Specks are removed and pinholes
+    filled. Empty boxes, and ink touching a box edge, are flagged.
+5.  Save the variants found, replacing only those, and update the profile
+    metrics.
+
+A photo without markers (a hand-drawn sheet) falls back to grouping ink into
+rows and characters and assigning the charset in reading order, one variant
+per character.
+
+``extract_sheet`` runs stages 2-4 without touching the database, so tests
+can call it on a synthetic photo.
 """
 from __future__ import annotations
 
 import json
 import logging
-import traceback
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from PIL import Image, ImageOps
 
 from app import jobs as job_store
-from app.config import DATA_DIR
 from app.models.glyph import Glyph
 from app.models.profile import Profile
 from app.storage import get_file_path, save_glyph_mask
+from workers.template import (
+    ARUCO_DICT,
+    CANVAS_H_PX,
+    CANVAS_W_PX,
+    CORNERS,
+    MARKER_SIZE_MM,
+    PX_PER_MM,
+    SHEET_CONFIGS,
+    Box,
+    decode_marker_id,
+    mm_to_px,
+    sheet_boxes,
+    sheet_markers,
+    sheet_name,
+)
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Public pipeline entry point
+# Constants
 # ---------------------------------------------------------------------------
-
-# Character set expected on the standard template (fallback).
-_DEFAULT_CHARSET = (
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    "0123456789.,!?;:'\"-()"
-)
-
-# Sheet-specific character sets, in reading order. The number of rows the
-# person used doesn't matter: rows are found from the ink, and characters are
-# assigned left to right, top to bottom.
-SHEET_CONFIGS: Dict[int, Dict[str, Any]] = {
-    1: {"name": "Lowercase", "charset": "abcdefghijklmnopqrstuvwxyz"},
-    2: {"name": "Uppercase", "charset": "ABCDEFGHIJKLMNOPQRSTUVWXYZ"},
-    3: {"name": "Digits & Punctuation", "charset": "0123456789.,!?;:'\"-()"},
-}
-
-# Components smaller than this (or flatter than _MIN_COMPONENT_HEIGHT px) are
-# specks or leftovers of the ruled notebook lines, not ink strokes.
-_MIN_COMPONENT_AREA = 20
-_MIN_COMPONENT_HEIGHT = 4
-
-# Characters whose bottom sits on the baseline; used to locate each row's baseline.
-_ON_BASELINE = set("abcdefhiklmnorstuvwxzABCDEFGHIKLMNOPRSTUVWXYZ0123456789!?:")
 
 # Characters whose height is the x-height (no ascender or descender).
 X_HEIGHT_CHARS = set("acemnorsuvwxz")
 
+# Template path. Lengths in millimetres are converted with PX_PER_MM.
+_DETECT_MAX_SIDE = 2000      # px; the markers are still ~90 px across at this size
+_READ_MARGIN_MM = 0.8        # ink this far past the printed box edge still counts
+_INNER_INSET_MM = 0.4        # a mark must reach this far inside the box to belong to it
+_BASELINE_SEARCH_MM = 2.0    # how far the printed baseline may sit from where the warp puts it
+_SIDE_SEARCH_MM = 1.5        # same for the box sides (boxes are only 2 mm apart)
+_LINE_BAND_MM = 0.35         # half-width of a printed guide line
+_SPECK_PX = 12               # smaller ink blobs are dust or JPEG noise
+_PINHOLE_PX = 8              # smaller gaps inside a stroke are filled
+_ALPHA_LO = 0.18             # darkness below this is paper or a printed guide
+_GLYPH_PAD_PX = 2
+_TEMPLATE_BEARING_PX = 0.5 * PX_PER_MM
+_SMALL_MARK_MM = 1.5         # a letter smaller than this both ways is probably a stray mark
+_SMALL_CHARS = set(".,'\"-")
+
+ISSUE_EDGE = "Ink touches the box edge, so part of the character may be cut off"
+ISSUE_SMALL = "Only a small mark was found, so this may not be the whole character"
+
+# Fallback path: components smaller than this (or flatter than
+# _MIN_COMPONENT_HEIGHT px) are specks or leftovers of ruled notebook lines.
+_MIN_COMPONENT_AREA = 20
+_MIN_COMPONENT_HEIGHT = 4
+_FALLBACK_ALPHA_LO = 0.06
+_FALLBACK_BEARING_PX = 3.0
+
+# Characters whose bottom sits on the baseline; used to locate each row's baseline.
+_ON_BASELINE = set("abcdefhiklmnorstuvwxzABCDEFGHIKLMNOPRSTUVWXYZ0123456789!?:")
+
+# Colour of the stored masks. Only the alpha channel matters: the preview and
+# the PDF renderer recolour glyphs to the chosen ink.
+_INK_BGR = (25, 25, 35)
+
+
+class SheetError(ValueError):
+    """The photo can't be read as the chosen sheet. The message is shown to the person."""
+
+
+@dataclass
+class ExtractedGlyph:
+    """One variant of one character, cut out of a sheet."""
+
+    char: str
+    variant: int
+    alpha: np.ndarray            # float32 in [0, 1], 1 = solid ink
+    baseline_offset: float       # px the bottom edge of ``alpha`` sits below the baseline
+    issue: Optional[str] = None  # set when the glyph needs a human look before use
+
+
+@dataclass
+class SheetResult:
+    glyphs: List[ExtractedGlyph]
+    used_markers: bool
+    empty: List[Tuple[str, int]] = field(default_factory=list)
+    warning: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Public pipeline entry point
+# ---------------------------------------------------------------------------
 
 def run_extraction(
     job_id: str,
@@ -90,7 +152,7 @@ def run_extraction(
     profile_id:
         Primary key of the owning Profile.
     sheet_number:
-        1-based sheet index (reserved for multi-sheet support).
+        1-based sheet index chosen in the UI.
     db_session_factory:
         Callable that returns a new SQLAlchemy ``Session`` (i.e. ``SessionLocal``).
     """
@@ -104,8 +166,57 @@ def run_extraction(
         db.close()
 
 
+def extract_sheet(
+    image: np.ndarray,
+    sheet_number: int,
+    progress: Optional[Callable[[int, str], None]] = None,
+) -> SheetResult:
+    """Read every glyph on one photographed sheet. Touches no database or job.
+
+    Parameters
+    ----------
+    image:
+        BGR photo or scan.
+    sheet_number:
+        The sheet the person said this is.
+    progress:
+        Optional ``(percent, stage)`` callback.
+
+    Raises
+    ------
+    SheetError
+        Wrong sheet, too few corner markers visible, or no handwriting found.
+    """
+    report = progress or (lambda pct, stage: None)
+    if sheet_number not in SHEET_CONFIGS:
+        raise SheetError(f"There is no sheet {sheet_number}.")
+
+    report(15, "Detecting markers")
+    found = _detect_markers(image)
+    if not found:
+        return _extract_without_markers(image, sheet_number, report)
+
+    seen_sheet = Counter(decode_marker_id(mid)[0] for mid in found).most_common(1)[0][0]
+    if seen_sheet != sheet_number:
+        raise SheetError(
+            f"This photo is of Sheet {seen_sheet} ({sheet_name(seen_sheet).lower()}), but it was "
+            f"uploaded as Sheet {sheet_number} ({sheet_name(sheet_number).lower()}). "
+            f"Choose Sheet {seen_sheet} and upload it again."
+        )
+    mine = {mid: pts for mid, pts in found.items() if decode_marker_id(mid)[0] == sheet_number}
+    if len(mine) < 3:
+        missing = [CORNERS[m.corner] for m in sheet_markers(sheet_number) if m.marker_id not in mine]
+        raise SheetError(
+            f"Only {len(mine)} of the 4 corner squares are visible (missing: {', '.join(missing)}). "
+            "Retake the photo with the whole sheet in view."
+        )
+
+    warped = _rectify(image, mine, sheet_number)
+    return _read_boxes(warped, sheet_number, report)
+
+
 # ---------------------------------------------------------------------------
-# Internal pipeline stages
+# Internal pipeline
 # ---------------------------------------------------------------------------
 
 def _run(
@@ -115,112 +226,396 @@ def _run(
     sheet_number: int,
     db: Any,
 ) -> None:
-    """Internal pipeline — called by :func:`run_extraction` inside a try/except."""
+    """Internal pipeline: called by :func:`run_extraction` inside a try/except."""
 
-    # ------------------------------------------------------------------
-    # Stage 1 — Load image
-    # ------------------------------------------------------------------
-    job_store.update_job(job_id, status="running", progress=5, stage="Loading image")
-    abs_path = get_file_path(scan_path)
-    image = cv2.imread(str(abs_path))
-    if image is None:
-        raise ValueError(f"OpenCV could not read image at {abs_path}. "
-                         "Ensure the file is a valid PNG/JPEG/TIFF.")
+    def progress(pct: int, stage: str) -> None:
+        job_store.update_job(job_id, status="running", progress=pct, stage=stage)
 
-    h, w = image.shape[:2]
-    logger.info("Loaded scan %s — %dx%d px", abs_path.name, w, h)
+    progress(5, "Loading image")
+    image = _load_image(get_file_path(scan_path))
+    logger.info("Loaded scan %s: %dx%d px", scan_path, image.shape[1], image.shape[0])
 
-    # ------------------------------------------------------------------
-    # Stage 2 — Detect ArUco markers & rectify perspective
-    # ------------------------------------------------------------------
-    job_store.update_job(job_id, progress=15, stage="Detecting markers")
-    rectified = _detect_and_rectify(image)
+    result = extract_sheet(image, sheet_number, progress)
+    if result.warning:
+        job_store.update_job(job_id, warning=result.warning)
 
-    # ------------------------------------------------------------------
-    # Stage 3 — Clean / binarise
-    # ------------------------------------------------------------------
-    job_store.update_job(job_id, progress=30, stage="Cleaning")
-    binary = _binarise(rectified)
-
-    # ------------------------------------------------------------------
-    # Stage 4 & 5 — Extract characters & measure glyphs
-    # ------------------------------------------------------------------
-    job_store.update_job(job_id, progress=45, stage="Extracting cells")
-    charset = SHEET_CONFIGS.get(sheet_number, {"charset": _DEFAULT_CHARSET})["charset"]
-
-    extracted_glyphs, shapes_found = _extract_character_crops(binary=binary, charset=charset)
-    if not extracted_glyphs:
-        raise ValueError("No handwriting found on this sheet. Check the photo is sharp and well lit.")
-    if shapes_found != len(charset):
-        # Characters are assigned in order, so a miscount shifts everything after it
-        job_store.update_job(
-            job_id,
-            warning=(
-                f"Found {shapes_found} characters but this sheet has {len(charset)}. "
-                "Some glyphs are probably labelled wrong; check them on the review page "
-                "or retake the photo with the characters in the template order."
-            ),
-        )
-
-    job_store.update_job(job_id, progress=70, stage="Measuring glyphs")
-    metrics_list = _save_extracted_glyphs(
-        extracted_glyphs=extracted_glyphs,
+    progress(70, "Measuring glyphs")
+    metrics_list = _save_glyphs(
+        glyphs=result.glyphs,
         profile_id=profile_id,
         db=db,
+        bearing=_TEMPLATE_BEARING_PX if result.used_markers else _FALLBACK_BEARING_PX,
+        tag=job_id[:8],
     )
 
-    # ------------------------------------------------------------------
-    # Stage 6 — Build aggregate profile metrics
-    # ------------------------------------------------------------------
-    job_store.update_job(job_id, progress=90, stage="Building profile metrics")
+    progress(90, "Building profile metrics")
     _update_profile_metrics(profile_id=profile_id, metrics_list=metrics_list, db=db)
 
     job_store.update_job(job_id, status="done", progress=100, stage="Complete")
-    logger.info("Extraction complete for job %s — %d glyphs saved", job_id, len(metrics_list))
+    logger.info("Extraction complete for job %s: %d glyphs saved", job_id, len(metrics_list))
 
 
-# ---------------------------------------------------------------------------
-# Stage helpers
-# ---------------------------------------------------------------------------
+def _load_image(path: Path) -> np.ndarray:
+    """Load a photo as BGR, upright according to its EXIF orientation.
 
-def _detect_and_rectify(image: np.ndarray) -> np.ndarray:
-    """Attempt ArUco marker detection and perspective warp.
-
-    If markers are not found the original image is returned unchanged.
-
-    Parameters
-    ----------
-    image:
-        Full-colour BGR image loaded by OpenCV.
-
-    Returns
-    -------
-    numpy.ndarray
-        Rectified (or original) BGR image.
-
-    Notes
-    -----
-    TODO: Implement full ArUco detection and homography warp.
-
-    - Use ``cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)``
-    - Detect corners with ``cv2.aruco.detectMarkers``
-    - Compute homography from the four corner marker centres
-    - Warp with ``cv2.warpPerspective`` to a canonical output size
+    Pillow rather than cv2.imread, which can't open non-ASCII paths on Windows.
     """
-    # TODO: detect four corner ArUco markers
-    # TODO: compute homography matrix H
-    # TODO: warp image to canonical paper dimensions
-    # Fallback: return image as-is
-    logger.debug("ArUco detection not yet implemented — using raw image.")
-    return image
+    try:
+        with Image.open(path) as im:
+            rgb = ImageOps.exif_transpose(im).convert("RGB")
+    except Exception as exc:
+        raise SheetError("Couldn't read this file as an image. Upload a JPEG, PNG or TIFF photo or scan.") from exc
+    return cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
 
 
-def _binarise(image: np.ndarray) -> np.ndarray:
-    """Convert image to a clean binary ink mask (255 = ink, 0 = background).
+# ---------------------------------------------------------------------------
+# Template path: markers, warp, boxes
+# ---------------------------------------------------------------------------
+
+def _detect_markers(image: np.ndarray) -> Dict[int, np.ndarray]:
+    """Find our corner markers. Returns ``{marker_id: 4x2 corners}`` in image pixels,
+    clockwise from the marker's own top-left corner."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    scale = min(1.0, _DETECT_MAX_SIDE / max(gray.shape[:2]))
+    small = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else gray
+
+    detector = cv2.aruco.ArucoDetector(
+        cv2.aruco.getPredefinedDictionary(ARUCO_DICT), cv2.aruco.DetectorParameters()
+    )
+    corners, ids, _ = detector.detectMarkers(small)
+    found: Dict[int, np.ndarray] = {}
+    if ids is None:
+        return found
+
+    # The detector's corners are only good to a pixel or so (more on the
+    # shrunken copy), so refine them on the full image
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01)
+    win = max(3, int(np.ceil(1 / scale)) + 1)
+    for quad, mid in zip(corners, ids.flatten()):
+        mid = int(mid)
+        if decode_marker_id(mid) is None or mid in found:
+            continue
+        pts = ((quad.reshape(4, 2) + 0.5) / scale - 0.5).astype(np.float32)
+        found[mid] = cv2.cornerSubPix(gray, pts.reshape(-1, 1, 2), (win, win), (-1, -1), criteria).reshape(4, 2)
+    return found
+
+
+def _rectify(image: np.ndarray, markers: Dict[int, np.ndarray], sheet_number: int) -> np.ndarray:
+    """Warp the photo onto the template's canonical canvas using every marker corner."""
+    layout = {m.marker_id: m for m in sheet_markers(sheet_number)}
+    ids = sorted(markers)
+    src = np.float32([p for mid in ids for p in markers[mid]])
+    dst = np.float32([(mm_to_px(x), mm_to_px(y)) for mid in ids for x, y in layout[mid].corner_points()])
+
+    # warpPerspective samples without averaging, so shrink a much sharper scan
+    # first or fine strokes alias
+    sides = [np.linalg.norm(markers[mid][i] - markers[mid][(i + 1) % 4]) for mid in ids for i in range(4)]
+    src_px_per_mm = float(np.mean(sides)) / MARKER_SIZE_MM
+    if src_px_per_mm > 1.5 * PX_PER_MM:
+        f = 1.2 * PX_PER_MM / src_px_per_mm
+        image = cv2.resize(image, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+        src = (src + 0.5) * f - 0.5
+
+    H, _ = cv2.findHomography(src, dst, cv2.RANSAC, 0.5 * PX_PER_MM)
+    if H is None:
+        raise SheetError("Couldn't line the sheet up from its corner squares. Retake the photo from straight above.")
+    err = np.linalg.norm(cv2.perspectiveTransform(src.reshape(-1, 1, 2), H).reshape(-1, 2) - dst, axis=1)
+    if float(np.median(err)) > PX_PER_MM:
+        raise SheetError("The sheet looks bent or folded. Lay it flat and retake the photo.")
+
+    return cv2.warpPerspective(
+        image, H, (CANVAS_W_PX, CANVAS_H_PX), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+    )
+
+
+def _paper_level(image: np.ndarray, window_px: int) -> np.ndarray:
+    """Local paper brightness per channel, so shadows and uneven light divide out.
+
+    The brightest value in a window wider than any pen stroke, worked out at
+    quarter resolution for speed.
+    """
+    h, w = image.shape[:2]
+    small = cv2.resize(image, (max(1, w // 4), max(1, h // 4)), interpolation=cv2.INTER_AREA)
+    k = max(3, (window_px // 4) | 1)
+    bg = cv2.dilate(small, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    bg = cv2.GaussianBlur(bg, (0, 0), k / 3)
+    return cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
+def _darkness(region: np.ndarray, paper: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Ink darkness in [0, 1] and a mask of guide-coloured pixels.
+
+    Darkness comes from the green channel, where the light cyan guides are
+    nearly white but black, blue and red inks are all dark.
+    """
+    norm = np.minimum(region.astype(np.float32) / np.maximum(paper.astype(np.float32), 1.0), 1.0)
+    b, g, r = cv2.split(norm)
+    guide = ((g - r) > 0.10) & ((b - r) > 0.10)
+    return 1.0 - g, guide
+
+
+def _find_line(profile: np.ndarray, expected: float, search: float) -> Optional[float]:
+    """Sub-pixel position of the strongest printed line near ``expected`` in a
+    coverage profile, or ``None`` if nothing stands out from the background."""
+    lo, hi = max(0, int(np.floor(expected - search))), min(profile.size, int(np.ceil(expected + search)) + 1)
+    seg = profile[lo:hi]
+    if seg.size < 3:
+        return None
+    i = int(np.argmax(seg))
+    if seg[i] - float(np.median(seg)) < 0.25:
+        return None
+    a, b = max(0, i - 3), min(seg.size, i + 4)
+    w = seg[a:b] - float(np.median(seg))
+    w = np.clip(w, 0, None)
+    return lo + float((np.arange(a, b) * w).sum() / max(w.sum(), 1e-6))
+
+
+@dataclass
+class _BoxRead:
+    dark: np.ndarray                     # guide-free darkness of the read region
+    inner: Tuple[int, int, int, int]     # the box proper, inset, in region coordinates
+    baseline: float                      # baseline as an edge coordinate in the region
+
+
+def _read_box(warped: np.ndarray, paper: np.ndarray, box: Box) -> _BoxRead:
+    """Cut out one box, find its printed lines, and remove them."""
+    px = PX_PER_MM
+    search = int(np.ceil(_BASELINE_SEARCH_MM * px))
+    margin = int(round(_READ_MARGIN_MM * px))
+    bx0, by0 = int(round(box.x * px)), int(round(box.y * px))
+    bx1, by1 = int(round((box.x + box.w) * px)), int(round((box.y + box.h) * px))
+
+    # Generous crop: the box may sit a little off where the warp puts it
+    cx0, cy0 = max(0, bx0 - margin - search), max(0, by0 - margin - search)
+    cx1, cy1 = min(CANVAS_W_PX, bx1 + margin + search), min(CANVAS_H_PX, by1 + margin + search)
+    dark, guide = _darkness(warped[cy0:cy1, cx0:cx1], paper[cy0:cy1, cx0:cx1])
+    line_like = (guide | ((dark > 0.07) & (dark < 0.35))).astype(np.float32)
+
+    # Baseline: strongest horizontal line near where it should be
+    inset = int(px)
+    rows = line_like[:, bx0 - cx0 + inset: bx1 - cx0 - inset].mean(axis=1)
+    expected_base = mm_to_px(box.baseline_y) - cy0
+    found = _find_line(rows, expected_base, _BASELINE_SEARCH_MM * px)
+    dy = 0.0 if found is None else found - expected_base
+
+    # Sides: both printed edges together, so the neighbouring box 2 mm away can't win
+    cols = line_like[by0 - cy0 + inset: by1 - cy0 - inset, :].mean(axis=0)
+    left, right = mm_to_px(box.x) - cx0, mm_to_px(box.x + box.w) - cx0
+    side_search = int(_SIDE_SEARCH_MM * px)
+    scores = [
+        (cols[int(round(left + s))] + cols[int(round(right + s))], s)
+        for s in range(-side_search, side_search + 1)
+        if 0 <= left + s and right + s < cols.size - 1
+    ]
+    dx = 0.0
+    if scores:
+        best, s = max(scores)
+        if best / 2 - float(np.median(cols)) >= 0.25:
+            dx = float(s)
+
+    # Drop the guides: guide-coloured pixels that aren't dark ink, and on a
+    # black-and-white print, anything faint along the printed lines
+    dark = np.where(guide & (dark < 0.45), 0.0, dark)
+    band = int(np.ceil(_LINE_BAND_MM * px))
+    faint = dark < 0.3
+    for y_mm in (box.baseline_y, box.x_height_y, box.y, box.y + box.h):
+        yc = int(round(mm_to_px(y_mm) - cy0 + dy))
+        sl = (slice(max(0, yc - band), max(0, yc + band + 1)), slice(None))
+        dark[sl] = np.where(faint[sl], 0.0, dark[sl])
+    for x_mm in (box.x, box.x + box.w):
+        xc = int(round(mm_to_px(x_mm) - cx0 + dx))
+        sl = (slice(None), slice(max(0, xc - band), max(0, xc + band + 1)))
+        dark[sl] = np.where(faint[sl], 0.0, dark[sl])
+
+    # Read region: the box where it really is, plus a margin for slight overflow
+    ox, oy = int(round(dx)), int(round(dy))
+    ex0, ey0 = max(0, bx0 - cx0 + ox - margin), max(0, by0 - cy0 + oy - margin)
+    ex1, ey1 = min(dark.shape[1], bx1 - cx0 + ox + margin), min(dark.shape[0], by1 - cy0 + oy + margin)
+    ins = int(round(_INNER_INSET_MM * px))
+    inner = (margin + ins, margin + ins, ex1 - ex0 - margin - ins, ey1 - ey0 - margin - ins)
+    baseline_edge = mm_to_px(box.baseline_y) + 0.5 - cy0 + dy - ey0
+    return _BoxRead(dark=dark[ey0:ey1, ex0:ex1], inner=inner, baseline=baseline_edge)
+
+
+def _box_glyph(read: _BoxRead, char: str, hi: float) -> Optional[Tuple[np.ndarray, float, Optional[str]]]:
+    """Turn a box's darkness into ``(alpha, baseline_offset, issue)``, or ``None`` if it's empty."""
+    alpha = np.clip((read.dark - _ALPHA_LO) / (hi - _ALPHA_LO), 0.0, 1.0).astype(np.float32)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats((alpha > 0.1).astype(np.uint8), connectivity=8)
+    ix0, iy0, ix1, iy1 = read.inner
+
+    keep = []
+    for i in range(1, n):
+        x, y, w, h, area = (int(v) for v in stats[i])
+        if area < _SPECK_PX:
+            continue
+        own = labels[y:y + h, x:x + w] == i
+        if alpha[y:y + h, x:x + w][own].max() < 0.5:
+            continue  # faint smudge
+        # Must reach inside the box proper: not a neighbour's overflow or the label above
+        ox0, oy0, ox1, oy1 = max(x, ix0), max(y, iy0), min(x + w, ix1), min(y + h, iy1)
+        if ox0 >= ox1 or oy0 >= oy1 or not (labels[oy0:oy1, ox0:ox1] == i).any():
+            continue
+        keep.append(i)
+    if not keep:
+        return None
+
+    mask = np.isin(labels, keep)
+    touches = bool(mask[0].any() or mask[-1].any() or mask[:, 0].any() or mask[:, -1].any())
+    # Keep the soft edge just outside the component threshold
+    halo = cv2.dilate(mask.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    alpha = _fill_pinholes(np.where(halo, alpha, 0.0).astype(np.float32))
+
+    ys, xs = np.nonzero(mask)
+    ink_h, ink_w = ys.max() - ys.min() + 1, xs.max() - xs.min() + 1
+    rows, cols = alpha.shape
+    y1, y2 = max(0, ys.min() - _GLYPH_PAD_PX), min(rows, ys.max() + 1 + _GLYPH_PAD_PX)
+    x1, x2 = max(0, xs.min() - _GLYPH_PAD_PX), min(cols, xs.max() + 1 + _GLYPH_PAD_PX)
+
+    issue = None
+    if touches:
+        issue = ISSUE_EDGE
+    elif char not in _SMALL_CHARS and max(ink_h, ink_w) < _SMALL_MARK_MM * PX_PER_MM:
+        issue = ISSUE_SMALL
+    return alpha[y1:y2, x1:x2], float(y2) - read.baseline, issue
+
+
+def _read_boxes(
+    warped: np.ndarray,
+    sheet_number: int,
+    report: Callable[[int, str], None],
+) -> SheetResult:
+    """Read every box of a rectified sheet."""
+    report(30, "Cleaning")
+    paper = _paper_level(warped, window_px=5 * PX_PER_MM)
+
+    report(45, "Extracting cells")
+    boxes = sheet_boxes(sheet_number)
+    reads = [_read_box(warped, paper, box) for box in boxes]
+
+    # One darkness scale for the whole sheet, so light and heavy strokes keep
+    # their difference; the darkest quarter of the ink becomes fully opaque
+    ink = np.concatenate([r.dark[r.dark > 0.3] for r in reads])
+    hi = float(np.clip(np.percentile(ink, 75), 0.45, 0.9)) if ink.size else 0.6
+
+    glyphs: List[ExtractedGlyph] = []
+    empty: List[Tuple[str, int]] = []
+    for box, read in zip(boxes, reads):
+        cut = _box_glyph(read, box.char, hi)
+        if cut is None:
+            empty.append((box.char, box.variant))
+            continue
+        alpha, offset, issue = cut
+        glyphs.append(ExtractedGlyph(box.char, box.variant, alpha, offset, issue))
+
+    if not glyphs:
+        raise SheetError("No handwriting found in any box. Check the photo is sharp and the pen is dark enough.")
+    return SheetResult(glyphs, used_markers=True, empty=empty, warning=_template_warning(len(boxes), glyphs, empty))
+
+
+def _list_boxes(items: List[Tuple[str, int]]) -> str:
+    """``[('q', 2), ('z', 0), ('z', 1)]`` -> ``"q box 3; z boxes 1 and 2"``."""
+    by_char: Dict[str, List[int]] = {}
+    for ch, v in items:
+        by_char.setdefault(ch, []).append(v + 1)
+    parts = []
+    for ch, nums in by_char.items():
+        if len(nums) == 1:
+            parts.append(f"{ch} box {nums[0]}")
+        else:
+            parts.append(f"{ch} boxes {', '.join(map(str, nums[:-1]))} and {nums[-1]}")
+    return "; ".join(parts)
+
+
+def _template_warning(n_boxes: int, glyphs: List[ExtractedGlyph], empty: List[Tuple[str, int]]) -> Optional[str]:
+    flagged: Dict[str, List[Tuple[str, int]]] = {}
+    for g in glyphs:
+        if g.issue:
+            flagged.setdefault(g.issue, []).append((g.char, g.variant))
+    if not empty and not flagged:
+        return None
+    parts = [f"Read {len(glyphs)} of {n_boxes} boxes."]
+    if empty:
+        parts.append(f"Empty, so left as they were: {_list_boxes(empty)}.")
+    for issue, items in flagged.items():
+        parts.append(f"Held back for review. {issue}: {_list_boxes(items)}.")
+    return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Glyph clean-up shared by both paths
+# ---------------------------------------------------------------------------
+
+def _fill_pinholes(alpha: np.ndarray) -> np.ndarray:
+    """Fill tiny gaps inside strokes (paper texture, a skipping pen) without
+    closing real counters like the eye of an 'e'."""
+    gaps = (alpha <= 0.5).astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(gaps, connectivity=4)
+    rows, cols = alpha.shape
+    grown = None
+    out = alpha
+    for i in range(1, n):
+        x, y, w, h, area = (int(v) for v in stats[i])
+        if area > _PINHOLE_PX or x == 0 or y == 0 or x + w == cols or y + h == rows:
+            continue
+        if grown is None:
+            grown = cv2.dilate(alpha, np.ones((5, 5), np.uint8))
+            out = alpha.copy()
+        hole = labels[y:y + h, x:x + w] == i
+        out[y:y + h, x:x + w][hole] = grown[y:y + h, x:x + w][hole]
+    return out
+
+
+def _alpha_png(alpha: np.ndarray) -> Optional[bytes]:
+    """Encode a soft mask as an RGBA PNG: constant ink colour, darkness in alpha."""
+    bgra = np.empty((*alpha.shape, 4), dtype=np.uint8)
+    bgra[..., :3] = _INK_BGR
+    bgra[..., 3] = np.round(np.clip(alpha, 0.0, 1.0) * 255).astype(np.uint8)
+    ok, buf = cv2.imencode(".png", bgra)
+    return buf.tobytes() if ok else None
+
+
+# ---------------------------------------------------------------------------
+# Fallback path: no markers, characters in reading order
+# ---------------------------------------------------------------------------
+
+def _extract_without_markers(
+    image: np.ndarray,
+    sheet_number: int,
+    report: Callable[[int, str], None],
+) -> SheetResult:
+    """Read a hand-drawn sheet: one sample per character, in reading order."""
+    report(30, "Cleaning")
+    binary, dark = _binarise(image)
+    ink = dark[binary > 0]
+    hi = float(np.clip(np.percentile(ink, 75), 0.3, 0.9)) if ink.size else 0.5
+    alpha = np.clip((dark - _FALLBACK_ALPHA_LO) / (hi - _FALLBACK_ALPHA_LO), 0.0, 1.0).astype(np.float32)
+
+    report(45, "Extracting cells")
+    charset = SHEET_CONFIGS[sheet_number]["charset"]
+    crops, shapes_found = _extract_character_crops(binary=binary, alpha=alpha, charset=charset)
+    if not crops:
+        raise SheetError("No handwriting found on this sheet. Check the photo is sharp and well lit.")
+
+    warning = None
+    if shapes_found != len(charset):
+        # Characters are assigned in order, so a miscount shifts everything after it
+        warning = (
+            f"Found {shapes_found} characters but this sheet has {len(charset)}. "
+            "Some glyphs are probably labelled wrong; check them on the review page "
+            "or retake the photo with the characters in the template order. "
+            "If this is a printed NeverWrite sheet, its corner squares weren't found: "
+            "retake the photo with all four in view and in focus."
+        )
+    glyphs = [ExtractedGlyph(ch, 0, _fill_pinholes(crop), offset) for ch, crop, offset in crops]
+    return SheetResult(glyphs, used_markers=False, warning=warning)
+
+
+def _binarise(image: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Binary ink mask for grouping (255 = ink) and soft darkness for the glyphs.
 
     Uses morphological illumination background subtraction to flatten lighting
-    gradients and eliminate paper shadows from smartphone photos. Also
-    suppresses horizontal ruled notebook lines.
+    gradients and eliminate paper shadows from smartphone photos. Horizontal
+    ruled notebook lines are removed from both outputs.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
@@ -239,11 +634,18 @@ def _binarise(image: np.ndarray) -> np.ndarray:
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
-    return binary
+    # Soft darkness relative to the local paper, with the ruled lines taken
+    # out too except where a stroke crosses them
+    dark = np.clip(diff.astype(np.float32) / np.maximum(bg.astype(np.float32), 1.0), 0.0, 1.0)
+    lines = cv2.dilate(horiz_lines, np.ones((3, 3), np.uint8)) > 0
+    dark[lines & (binary == 0)] = 0.0
+
+    return binary, dark
 
 
 def _extract_character_crops(
     binary: np.ndarray,
+    alpha: np.ndarray,
     charset: str,
 ) -> Tuple[List[Tuple[str, np.ndarray, float]], int]:
     """Extract individual character crops in reading order.
@@ -267,13 +669,15 @@ def _extract_character_crops(
     Parameters
     ----------
     binary:
-        Clean binary uint8 image (255 = ink).
+        Clean binary uint8 image (255 = ink), used to find the characters.
+    alpha:
+        Soft ink mask (float32, 0..1) the crops are cut from.
     charset:
         Ordered string of expected characters in reading order.
 
     Returns
     -------
-    (list of (char, crop_image, baseline_offset), number_of_characters_found)
+    (list of (char, alpha_crop, baseline_offset), number_of_characters_found)
         ``baseline_offset`` is how far the crop's bottom edge sits below the
         row baseline in pixels (negative for marks above it, like apostrophes).
     """
@@ -359,16 +763,22 @@ def _extract_character_crops(
         baselines[row_idx] = float(np.median(bottoms)) if bottoms else 0.0
 
     results: List[Tuple[str, np.ndarray, float]] = []
+    halo = np.ones((3, 3), np.uint8)
     for ch, (row_idx, (x1, y1, x2, y2, ids)) in pairs:
         px1, py1 = max(0, x1 - 2), max(0, y1 - 2)
         px2, py2 = min(w, x2 + 2), min(h, y2 + 2)
-        # Keep only this character's own components, not ink from neighbours
-        crop = np.where(np.isin(labels[py1:py2, px1:px2], ids), 255, 0).astype(np.uint8)
+        # Keep only this character's own components (and their soft edge), not ink from neighbours
+        own = cv2.dilate(np.isin(labels[py1:py2, px1:px2], ids).astype(np.uint8), halo)
+        crop = np.where(own > 0, alpha[py1:py2, px1:px2], 0.0).astype(np.float32)
         if crop.shape[0] > 0 and crop.shape[1] > 0:
             results.append((ch, crop, float(py2) - baselines[row_idx]))
 
     return results, len(shapes)
 
+
+# ---------------------------------------------------------------------------
+# Saving and metrics
+# ---------------------------------------------------------------------------
 
 def _estimate_stroke_width(cell: np.ndarray) -> float:
     """Estimate average stroke width using distance transform."""
@@ -384,76 +794,51 @@ def _estimate_stroke_width(cell: np.ndarray) -> float:
     return float(np.median(values) * 2.0)
 
 
-def _save_extracted_glyphs(
-    extracted_glyphs: List[Tuple[str, np.ndarray, float]],
+def _save_glyphs(
+    glyphs: List[ExtractedGlyph],
     profile_id: int,
     db: Any,
+    bearing: float,
+    tag: str,
 ) -> List[Dict[str, float]]:
-    """Measure extracted glyph crops, save mask PNGs, and update DB records."""
+    """Save mask PNGs and add or replace exactly the variants this scan contains.
+
+    Variants the scan doesn't contain (empty boxes) keep whatever they had.
+    """
     metrics_list: List[Dict[str, float]] = []
 
-    for char, mask_crop, baseline_offset in extracted_glyphs:
-        bh, bw = mask_crop.shape[:2]
+    for g in glyphs:
+        bh, bw = g.alpha.shape[:2]
         if bh == 0 or bw == 0:
             continue
-
-        # Convert binary mask into transparent 4-channel BGRA PNG
-        # Ink pixels (255) are dark with full opacity (Alpha=255)
-        # Background pixels (0) are completely transparent (Alpha=0)
-        bgra = np.zeros((bh, bw, 4), dtype=np.uint8)
-        bgra[mask_crop > 0] = [25, 25, 35, 255]
-        bgra[mask_crop == 0] = [255, 255, 255, 0]
-
-        success, png_buf = cv2.imencode(".png", bgra)
-        if not success:
-            logger.warning("Failed to encode PNG for char=%r", char)
+        png = _alpha_png(g.alpha)
+        if png is None:
+            logger.warning("Failed to encode PNG for char=%r", g.char)
             continue
+        mask_path = save_glyph_mask(data=png, profile_id=profile_id, char=g.char, variant=g.variant, tag=tag)
 
-        variant_index = 0
-        relative_mask_path = save_glyph_mask(
-            data=png_buf.tobytes(),
-            profile_id=profile_id,
-            char=char,
-            variant=variant_index,
-        )
-
-        stroke_w = _estimate_stroke_width(mask_crop)
-
-        bearing_left = 3.0
-        bearing_right = 3.0
-
-        existing_glyph = (
+        glyph = (
             db.query(Glyph)
-            .filter(Glyph.profile_id == profile_id, Glyph.char == char)
+            .filter(Glyph.profile_id == profile_id, Glyph.char == g.char, Glyph.variant_index == g.variant)
             .first()
         )
-
-        if existing_glyph:
-            existing_glyph.mask_path = relative_mask_path
-            existing_glyph.width = float(bw)
-            existing_glyph.height = float(bh)
-            existing_glyph.baseline_offset = baseline_offset
-            existing_glyph.bearing_left = bearing_left
-            existing_glyph.bearing_right = bearing_right
-            existing_glyph.accepted = True
-        else:
-            glyph = Glyph(
-                profile_id=profile_id,
-                char=char,
-                variant_index=variant_index,
-                mask_path=relative_mask_path,
-                svg_path=None,
-                width=float(bw),
-                height=float(bh),
-                baseline_offset=baseline_offset,
-                bearing_left=bearing_left,
-                bearing_right=bearing_right,
-                accepted=True,
-            )
+        if glyph is None:
+            glyph = Glyph(profile_id=profile_id, char=g.char, variant_index=g.variant, svg_path=None)
             db.add(glyph)
+        elif glyph.mask_path and glyph.mask_path != mask_path:
+            get_file_path(glyph.mask_path).unlink(missing_ok=True)
+
+        glyph.mask_path = mask_path
+        glyph.width = float(bw)
+        glyph.height = float(bh)
+        glyph.baseline_offset = g.baseline_offset
+        glyph.bearing_left = bearing
+        glyph.bearing_right = bearing
+        glyph.accepted = g.issue is None
+        glyph.issue = g.issue
 
         metrics_list.append({
-            "stroke_w": stroke_w,
+            "stroke_w": _estimate_stroke_width((g.alpha > 0.5).astype(np.uint8) * 255),
             "slant": 0.0,
         })
 
@@ -473,7 +858,7 @@ def _update_profile_metrics(
     profile_id:
         PK of the Profile to update.
     metrics_list:
-        List of per-glyph metric dicts from :func:`_measure_and_save_glyphs`.
+        List of per-glyph metric dicts from :func:`_save_glyphs`.
     db:
         Active SQLAlchemy session.
     """
