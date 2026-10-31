@@ -63,11 +63,16 @@ export interface Job {
   stage?: string
 }
 
+export type PageSize = 'A6' | 'A7' | 'DL' | 'A4' | 'custom'
+
 export interface RenderSettings {
+  page_size: PageSize    // preset name; the size itself is in page_width_mm / page_height_mm
+  page_width_mm: number
+  page_height_mm: number
+  align: 'left' | 'center'
   font_size: number
   line_spacing: number
   ink_color: string
-  paper_type: 'plain' | 'ruled' | 'grid' | 'none'
   margin_top: number
   margin_bottom: number
   margin_left: number

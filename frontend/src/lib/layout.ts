@@ -1,4 +1,4 @@
-import { Glyph, RenderSettings } from './api'
+import type { Glyph, PageSize, RenderSettings } from './api'
 import { mulberry32, randRange, randInt } from './prng'
 
 export interface PlacedGlyph {
@@ -15,19 +15,50 @@ export interface LayoutResult {
   pageHeightPx: number
 }
 
-/** A4 at 96 dpi for canvas preview (210 mm × 297 mm). */
-const A4_W_MM = 210
-const A4_H_MM = 297
-const PX_PER_MM = 96 / 25.4 // ≈ 3.7795 px/mm
+/** Preset page sizes in mm. DL is the landscape envelope. */
+export const PAGE_PRESETS: Record<Exclude<PageSize, 'custom'>, { label: string; width: number; height: number }> = {
+  A6: { label: 'A6 card', width: 105, height: 148 },
+  A7: { label: 'A7 card', width: 74, height: 105 },
+  DL: { label: 'DL envelope', width: 220, height: 110 },
+  A4: { label: 'A4 page', width: 210, height: 297 },
+}
 
-const PAGE_W_PX = Math.round(A4_W_MM * PX_PER_MM)
-const PAGE_H_PX = Math.round(A4_H_MM * PX_PER_MM)
+/** Canvas preview and layout work at 96 dpi. */
+const PX_PER_MM = 96 / 25.4 // ≈ 3.7795 px/mm
 
 // Points to pixels: 1 pt = 1/72 inch = 96/72 px at 96 dpi
 const PT_TO_PX = 96 / 72
 
 // Letters with no ascender or descender; their height is the x-height
 const X_HEIGHT_CHARS = new Set('acemnorsuvwxz')
+
+/** Page size in 96 dpi pixels, rounded the same way as the PDF renderer. */
+export function pageSizePx(settings: RenderSettings): [number, number] {
+  return [
+    Math.round(settings.page_width_mm * PX_PER_MM),
+    Math.round(settings.page_height_mm * PX_PER_MM),
+  ]
+}
+
+/** Cards and envelopes must fit on one page; only A4 may run onto more. */
+export function isSinglePage(settings: RenderSettings): boolean {
+  return settings.page_size !== 'A4'
+}
+
+/**
+ * Characters in `text` with no accepted glyph, in order of first use.
+ * The layout leaves a gap for each of them, so list them before export.
+ */
+export function missingChars(text: string, glyphs: Glyph[]): string[] {
+  const have = new Set(glyphs.filter((g) => g.accepted).map((g) => g.char))
+  const missing: string[] = []
+  for (const ch of Array.from(text)) {
+    if (ch === ' ' || ch === '\n') continue
+    if (have.has(ch) || have.has(ch.toLowerCase())) continue
+    if (!missing.includes(ch)) missing.push(ch)
+  }
+  return missing
+}
 
 /**
  * Median height of the profile's short lowercase letters, in glyph pixels.
@@ -43,12 +74,19 @@ export function estimateXHeight(glyphs: Glyph[], fallback: number): number {
   return heights.length % 2 ? heights[mid] : (heights[mid - 1] + heights[mid]) / 2
 }
 
+/** One character of the word being built: its glyph (null if none) and advance width. */
+interface WordChar {
+  placed: PlacedGlyph | null
+  advance: number
+}
+
 /**
  * Lay out `text` using `glyphs` and `settings`.
  * Returns placed glyphs per page.
  *
  * backend/workers/renderer.py ports this function line for line so the PDF
- * matches the preview. Change both together, including the order of rng calls.
+ * matches the preview. Change both together, including the order of rng calls
+ * and of the arithmetic; backend/tests/test_layout_parity.py checks them.
  */
 export function layoutText(
   text: string,
@@ -74,14 +112,17 @@ export function layoutText(
   const xHeightRef = estimateXHeight(glyphs, profileXHeight)
   const baseScale = fontSizePx / xHeightRef
 
+  const [pageWidthPx, pageHeightPx] = pageSizePx(settings)
+
   // Margins in px
   const mTop = settings.margin_top * PX_PER_MM
   const mBottom = settings.margin_bottom * PX_PER_MM
   const mLeft = settings.margin_left * PX_PER_MM
   const mRight = settings.margin_right * PX_PER_MM
 
-  const contentWidth = PAGE_W_PX - mLeft - mRight
-  const contentHeight = PAGE_H_PX - mTop - mBottom
+  const contentWidth = pageWidthPx - mLeft - mRight
+  const contentHeight = pageHeightPx - mTop - mBottom
+  const maxX = mLeft + contentWidth
 
   // Line height in px
   const lineHeight = fontSizePx * settings.line_spacing
@@ -92,52 +133,68 @@ export function layoutText(
   // Slant correction in radians
   const slantRad = (settings.slant_correction * Math.PI) / 180
 
-  const pages: PlacedGlyph[][] = []
-  let currentPage: PlacedGlyph[] = []
-  pages.push(currentPage)
+  const center = settings.align === 'center'
+
+  const pages: PlacedGlyph[][] = [[]]
 
   let curX = mLeft
   let curY = mTop + fontSizePx // baseline starts one line down from top margin
 
-  const chars = Array.from(text)
-  let wordBuffer: PlacedGlyph[] = []
+  // Glyphs on the current line, and the right edge of its last word
+  let line: PlacedGlyph[] = []
+  let lineEnd = mLeft
+
+  let word: WordChar[] = []
   let wordWidth = 0
 
+  const endLine = () => {
+    if (center) {
+      const shift = (contentWidth - (lineEnd - mLeft)) / 2
+      for (const pg of line) pg.x += shift
+    }
+    line = []
+    lineEnd = mLeft
+  }
+
+  const newLine = () => {
+    endLine()
+    curX = mLeft
+    curY += lineHeight
+    if (curY > mTop + contentHeight) {
+      pages.push([])
+      curY = mTop + fontSizePx
+    }
+  }
+
+  const place = (wc: WordChar) => {
+    if (wc.placed) {
+      wc.placed.x += curX
+      wc.placed.y += curY
+      pages[pages.length - 1].push(wc.placed)
+      line.push(wc.placed)
+    }
+    curX += wc.advance
+    lineEnd = curX
+  }
+
   const flushWord = () => {
-    if (wordBuffer.length === 0) return
-    // Check if word fits on current line
-    if (curX + wordWidth > mLeft + contentWidth && curX > mLeft) {
-      // Wrap line
-      curX = mLeft
-      curY += lineHeight
-      if (curY > mTop + contentHeight) {
-        currentPage = []
-        pages.push(currentPage)
-        curY = mTop + fontSizePx
-      }
+    if (word.length === 0) return
+    // Wrap if the word doesn't fit on the current line
+    if (curX + wordWidth > maxX && curX > mLeft) newLine()
+    // A word wider than a whole line breaks between characters
+    const tooWide = curX + wordWidth > maxX
+    for (const wc of word) {
+      if (tooWide && curX + wc.advance > maxX && curX > mLeft) newLine()
+      place(wc)
     }
-    for (const pg of wordBuffer) {
-      pg.x += curX
-      pg.y += curY
-      currentPage.push(pg)
-    }
-    curX += wordWidth
-    wordBuffer = []
+    word = []
     wordWidth = 0
   }
 
-  for (let ci = 0; ci < chars.length; ci++) {
-    const ch = chars[ci]
-
+  for (const ch of Array.from(text)) {
     if (ch === '\n') {
       flushWord()
-      curX = mLeft
-      curY += lineHeight
-      if (curY > mTop + contentHeight) {
-        currentPage = []
-        pages.push(currentPage)
-        curY = mTop + fontSizePx
-      }
+      newLine()
       continue
     }
 
@@ -151,8 +208,10 @@ export function layoutText(
 
     const variants = glyphMap.get(ch) ?? glyphMap.get(ch.toLowerCase()) ?? []
     if (variants.length === 0) {
-      // Unknown char: advance by a small space
-      wordWidth += baseScale * xHeightRef * 0.5
+      // No glyph: leave a gap (missingChars lists these before export)
+      const advance = baseScale * xHeightRef * 0.5
+      word.push({ placed: null, advance })
+      wordWidth += advance
       continue
     }
 
@@ -165,29 +224,29 @@ export function layoutText(
     const rotation = slantRad + randRange(rng, -0.035, 0.035) * mess
     const baselineWobble = randRange(rng, -1, 1) * mess
 
-    const glyphW = (variant.bearing_left + variant.width + variant.bearing_right) * scale
-    const charGap = variant.bearing_left * scale
+    const advance = (variant.bearing_left + variant.width + variant.bearing_right) * scale
 
-    const placed: PlacedGlyph = {
-      glyph: variant,
-      x: wordWidth + charGap, // relative; will be offset by curX when flushed
-      y: baselineWobble,       // relative; will be offset by curY when flushed
-      scale,
-      rotation,
-    }
-
-    wordBuffer.push(placed)
-    wordWidth += glyphW
+    word.push({
+      placed: {
+        glyph: variant,
+        x: variant.bearing_left * scale, // offset by curX when placed
+        y: baselineWobble,               // offset by curY when placed
+        scale,
+        rotation,
+      },
+      advance,
+    })
+    wordWidth += advance
   }
 
   // Flush remaining word
   flushWord()
+  endLine()
 
-  return {
-    pages,
-    pageWidthPx: PAGE_W_PX,
-    pageHeightPx: PAGE_H_PX,
-  }
+  // Trailing newlines can leave empty pages at the end; drop them
+  while (pages.length > 1 && pages[pages.length - 1].length === 0) pages.pop()
+
+  return { pages, pageWidthPx, pageHeightPx }
 }
 
 /** Glyph masks recoloured to the ink colour, keyed by image URL and colour. */
@@ -211,90 +270,30 @@ function tinted(img: HTMLImageElement, url: string, color: string): HTMLCanvasEl
   return c
 }
 
-/** Paper background colors */
-const PAPER_COLORS: Record<RenderSettings['paper_type'], string> = {
-  plain: '#faf8f4',
-  ruled: '#faf8f4',
-  grid: '#faf8f4',
-  none: '#ffffff',
-}
+/** Preview paper colour. The PDF is ink only, so the card stock shows through. */
+const PAPER_COLOR = '#faf8f4'
+
+/** Latest draw per canvas, so a slow earlier draw can't paint over a newer one. */
+const drawTokens = new WeakMap<HTMLCanvasElement, number>()
 
 /**
  * Render a LayoutResult onto a Canvas element.
- * Uses drawImage with the glyph mask images.
+ * Uses drawImage with the glyph mask images. `pixelRatio` sets the backing
+ * resolution; the caller sizes the canvas in CSS pixels.
  */
 export async function renderToCanvas(
   canvas: HTMLCanvasElement,
   layout: LayoutResult,
   pageIndex: number,
   settings: RenderSettings,
-  imageCache: Map<string, HTMLImageElement>
+  imageCache: Map<string, HTMLImageElement>,
+  pixelRatio = 1
 ): Promise<void> {
+  const token = (drawTokens.get(canvas) ?? 0) + 1
+  drawTokens.set(canvas, token)
+
   const { pageWidthPx, pageHeightPx, pages } = layout
-  canvas.width = pageWidthPx
-  canvas.height = pageHeightPx
-
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return
-
-  // ── Background ──────────────────────────────────────────────────────────────
-  ctx.fillStyle = PAPER_COLORS[settings.paper_type]
-  ctx.fillRect(0, 0, pageWidthPx, pageHeightPx)
-
-  const PX_PER_MM = 96 / 25.4
-  const mTop = settings.margin_top * PX_PER_MM
-  const mBottom = settings.margin_bottom * PX_PER_MM
-  const mLeft = settings.margin_left * PX_PER_MM
-  const contentW = pageWidthPx - mLeft - settings.margin_right * PX_PER_MM
-  const contentH = pageHeightPx - mTop - mBottom
-  const fontSizePx = settings.font_size * (96 / 72)
-  const lineHeight = fontSizePx * settings.line_spacing
-
-  // ── Ruled lines ─────────────────────────────────────────────────────────────
-  if (settings.paper_type === 'ruled') {
-    ctx.strokeStyle = '#b8c8d8'
-    ctx.lineWidth = 0.5
-    let ly = mTop + fontSizePx
-    while (ly < mTop + contentH) {
-      ctx.beginPath()
-      ctx.moveTo(mLeft, ly)
-      ctx.lineTo(mLeft + contentW, ly)
-      ctx.stroke()
-      ly += lineHeight
-    }
-    // Left margin line
-    ctx.strokeStyle = '#f0a0a0'
-    ctx.lineWidth = 0.7
-    ctx.beginPath()
-    ctx.moveTo(mLeft, mTop)
-    ctx.lineTo(mLeft, mTop + contentH)
-    ctx.stroke()
-  }
-
-  // ── Grid lines ───────────────────────────────────────────────────────────────
-  if (settings.paper_type === 'grid') {
-    const gridSize = fontSizePx * 0.5
-    ctx.strokeStyle = '#c8d8e8'
-    ctx.lineWidth = 0.4
-    for (let gx = mLeft; gx <= mLeft + contentW; gx += gridSize) {
-      ctx.beginPath()
-      ctx.moveTo(gx, mTop)
-      ctx.lineTo(gx, mTop + contentH)
-      ctx.stroke()
-    }
-    for (let gy = mTop; gy <= mTop + contentH; gy += gridSize) {
-      ctx.beginPath()
-      ctx.moveTo(mLeft, gy)
-      ctx.lineTo(mLeft + contentW, gy)
-      ctx.stroke()
-    }
-  }
-
-  // ── Glyphs ───────────────────────────────────────────────────────────────────
-  const page = pages[pageIndex]
-  if (!page) return
-
-  const inkColor = settings.ink_color || '#1a1a2e'
+  const page = pages[pageIndex] ?? []
 
   const toUrl = (rawPath: string): string => {
     const clean = rawPath.replace(/\\/g, '/')
@@ -316,9 +315,24 @@ export async function renderToCanvas(
     })
   }
 
-  // Load all images in parallel
+  // Load all images in parallel before touching the canvas, then draw in one go
   const uniquePaths = [...new Set(page.map((pg) => pg.glyph.mask_path))]
   await Promise.allSettled(uniquePaths.map(loadImage))
+  if (drawTokens.get(canvas) !== token) return
+
+  canvas.width = Math.round(pageWidthPx * pixelRatio)
+  canvas.height = Math.round(pageHeightPx * pixelRatio)
+
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+
+  // ── Background ──────────────────────────────────────────────────────────────
+  ctx.fillStyle = PAPER_COLOR
+  ctx.fillRect(0, 0, pageWidthPx, pageHeightPx)
+
+  // ── Glyphs ───────────────────────────────────────────────────────────────────
+  const inkColor = settings.ink_color || '#1a1a2e'
 
   for (const placed of page) {
     const url = toUrl(placed.glyph.mask_path)
