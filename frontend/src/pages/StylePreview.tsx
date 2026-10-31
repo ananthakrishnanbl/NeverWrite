@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { Check, ArrowLeft } from 'lucide-react'
 import { getGlyphs, getProfile, profileXHeight, Glyph, Profile } from '../lib/api'
 import { layoutText, renderToCanvas } from '../lib/layout'
-import { useInkTwinStore } from '../store'
+import { useDraft } from '../store'
 
 const PANGRAM = 'The quick brown fox jumps over the lazy dog.'
 
@@ -14,7 +14,7 @@ export default function StylePreview() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const imageCacheRef = useRef(new Map<string, HTMLImageElement>())
-  const { renderSettings, seed } = useInkTwinStore()
+  const { settings, seed } = useDraft(profileId)
 
   useEffect(() => {
     if (!profileId) return
@@ -24,12 +24,12 @@ export default function StylePreview() {
         const canvas = canvasRef.current
         if (!canvas) return
         const xHeight = profileXHeight(profile)
-        const layout = layoutText(PANGRAM, glyphs, renderSettings, xHeight, seed)
-        await renderToCanvas(canvas, layout, 0, renderSettings, imageCacheRef.current)
+        const layout = layoutText(PANGRAM, glyphs, settings, xHeight, seed)
+        await renderToCanvas(canvas, layout, 0, settings, imageCacheRef.current)
       })
       .catch(() => setError('Failed to render preview.'))
       .finally(() => setLoading(false))
-  }, [profileId, renderSettings, seed])
+  }, [profileId, settings, seed])
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-12">
