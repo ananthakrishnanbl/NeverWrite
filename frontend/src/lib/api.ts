@@ -44,7 +44,8 @@ export interface Glyph {
   bearing_right: number
   accepted: boolean
   issue?: string | null // why extraction held this variant back for review
-  has_strokes?: boolean // drawn on the Draw page, so a pen plotter can write it
+  has_strokes?: boolean // has pen paths a plotter can follow
+  stroke_source?: 'drawn' | 'traced' | null // drawn on the Draw page, or traced through a scan's ink
 }
 
 export interface GlyphPatch {
@@ -226,6 +227,18 @@ export async function patchGlyph(
 /** One stroke: [x, y] points in millimetres of the writing box, in the order the pen moved. */
 export type DrawnStroke = [number, number][]
 
+/** A glyph's pen paths, in its mask's pixel coordinates. */
+export interface GlyphStrokes {
+  source: 'drawn' | 'traced' | null
+  strokes: [number, number][][]
+}
+
+/** Pen paths of every glyph in a profile, keyed by glyph id. Traces any scanned glyph not traced yet. */
+export async function getProfileStrokes(profileId: number): Promise<Record<string, GlyphStrokes>> {
+  const res = await http.get<Record<string, GlyphStrokes>>(`/profiles/${profileId}/strokes`)
+  return res.data
+}
+
 /** Save one variant of a character drawn on the Draw page, replacing whatever that slot held. */
 export async function saveDrawnGlyph(
   profileId: number,
@@ -313,7 +326,9 @@ export interface PlotSummary {
   draw_mm: number
   travel_mm: number
   seconds: number
-  unplottable_chars: string[] // on the card, but drawn from a scan, so left out of the plot
+  unplottable_chars: string[] // on the card, but with no pen path (its image is missing), so left out
+  traced_chars: string[]      // on the card, plotted along a path traced through scanned ink
+  drawn_chars: string[]       // on the card, plotted along the path drawn on the Draw page
   missing_chars: string[]     // no glyph at all
   clipped_strokes: number     // cut at the card edge
 }

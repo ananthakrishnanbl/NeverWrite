@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { Check, X, ChevronRight, SlidersHorizontal, Upload, AlertTriangle, PenTool } from 'lucide-react'
-import { getGlyphs, patchGlyph, Glyph, GlyphPatch } from '../lib/api'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
+import { Check, X, ChevronRight, SlidersHorizontal, Upload, AlertTriangle, PenTool, Route } from 'lucide-react'
+import { getGlyphs, getProfileStrokes, patchGlyph, Glyph, GlyphPatch, GlyphStrokes } from '../lib/api'
 import { estimateXHeight } from '../lib/layout'
 import { SHEETS, Sheet, VARIANTS_PER_CHAR, READY_VARIANTS } from '../lib/sheets'
 
@@ -33,11 +33,12 @@ const X_HEIGHT_AT = 0.24 // the profile's x-height, as a share of the thumbnail 
  * A glyph at the profile's common scale, sitting on a faint baseline, so a
  * variant that is too big, too small or off the line stands out next to the others.
  */
-function GlyphThumb({ glyph, scale, height = THUMB_H, baselineOffset }: {
+function GlyphThumb({ glyph, scale, height = THUMB_H, baselineOffset, paths }: {
   glyph: Glyph
   scale: number
   height?: number
   baselineOffset?: number
+  paths?: [number, number][][] // pen paths to draw over the glyph, in its pixel coordinates
 }) {
   const baselineY = height * BASELINE_AT
   const w = glyph.width * scale
@@ -52,6 +53,28 @@ function GlyphThumb({ glyph, scale, height = THUMB_H, baselineOffset }: {
         className="absolute left-1/2 -translate-x-1/2 max-w-none"
         style={{ top: bottom - h, width: w, height: h }}
       />
+      {paths && (
+        <svg
+          className="absolute left-1/2 -translate-x-1/2 overflow-visible pointer-events-none"
+          style={{ top: bottom - h, width: w, height: h }}
+          viewBox={`0 0 ${glyph.width} ${glyph.height}`}
+          preserveAspectRatio="none"
+          aria-hidden
+        >
+          {paths.map((stroke, i) => (
+            <polyline
+              key={i}
+              points={(stroke.length === 1 ? [stroke[0], stroke[0]] : stroke).map(([x, y]) => `${x},${y}`).join(' ')}
+              fill="none"
+              stroke="#e11d48"
+              strokeWidth={1.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
+        </svg>
+      )}
     </div>
   )
 }
@@ -76,6 +99,26 @@ export default function GlyphReview() {
   const [selected, setSelected] = useState<Glyph | null>(null)
   const [patch, setPatch] = useState<GlyphPatch | null>(null)
   const [saving, setSaving] = useState(false)
+  const [searchParams] = useSearchParams()
+  const [showPaths, setShowPaths] = useState(searchParams.get('paths') === '1')
+  const [paths, setPaths] = useState<Record<string, GlyphStrokes> | null>(null)
+
+  // Pen paths load on first use; scanned glyphs not traced yet are traced then
+  useEffect(() => {
+    if (!showPaths || paths || !profileId) return
+    let cancelled = false
+    getProfileStrokes(Number(profileId))
+      .then((p) => {
+        if (cancelled) return
+        setPaths(p)
+        setGlyphs((prev) => prev.map((g) => {
+          const s = p[String(g.id)]
+          return s ? { ...g, stroke_source: s.source, has_strokes: s.strokes.length > 0 } : g
+        }))
+      })
+      .catch(() => { if (!cancelled) setError('Could not load the pen paths.') })
+    return () => { cancelled = true }
+  }, [showPaths, paths, profileId])
 
   useEffect(() => {
     if (!profileId) return
@@ -223,6 +266,30 @@ export default function GlyphReview() {
         ))}
       </div>
 
+      {/* Pen paths: what a plotter will follow */}
+      <div className="mb-4 flex flex-wrap items-start gap-3">
+        <button
+          onClick={() => setShowPaths((v) => !v)}
+          aria-pressed={showPaths}
+          className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border transition-colors ${
+            showPaths ? 'border-rose-300 bg-rose-50 text-rose-700' : 'border-ink-200 text-ink-600 hover:bg-ink-50'
+          }`}
+        >
+          <Route className="w-4 h-4" />
+          {showPaths && !paths ? 'Tracing…' : 'Show pen paths'}
+        </button>
+        {showPaths && (
+          <p className="flex-1 min-w-[16rem] text-sm text-ink-500">
+            The red lines are what a pen plotter follows. Drawn letters (marked with a pen) follow your pen exactly;
+            scanned ones are traced through the middle of the ink. If a path looks wrong, draw that letter on the{' '}
+            <button onClick={() => navigate(`/profiles/${profileId}/draw`)} className="underline text-ink-700">
+              Draw page
+            </button>
+            .
+          </p>
+        )}
+      </div>
+
       {error && (
         <div className="mb-4 bg-red-50 text-red-700 border border-red-200 rounded-lg px-4 py-3 text-sm">{error}</div>
       )}
@@ -281,9 +348,9 @@ export default function GlyphReview() {
                           className={`block w-full hover:bg-ink-50/60 ${g.accepted ? '' : 'opacity-60'}`}
                           title="Adjust baseline and spacing"
                         >
-                          <GlyphThumb glyph={g} scale={scale} />
+                          <GlyphThumb glyph={g} scale={scale} paths={showPaths ? paths?.[String(g.id)]?.strokes : undefined} />
                         </button>
-                        {g.has_strokes && (
+                        {g.stroke_source === 'drawn' && (
                           <span className="absolute top-1 left-1" title="Drawn in the browser, so a pen plotter can write it">
                             <PenTool className="w-3.5 h-3.5 text-ink-400" />
                           </span>

@@ -109,11 +109,11 @@ export default function Capture() {
             through a chat app.
           </p>
           <p className="text-sm text-ink-400 mt-1">
-            Writing for a pen plotter?{' '}
+            Scanned letters are traced for a pen plotter automatically. For the exact path your pen took,{' '}
             <button onClick={() => navigate(`/profiles/${profileId}/draw`)} className="underline text-ink-600 hover:text-ink-800">
-              Draw your letters in the browser
+              draw your letters in the browser
             </button>{' '}
-            instead: a plotter can only follow drawn strokes.
+            instead.
           </p>
         </div>
         {hasExistingGlyphs && (

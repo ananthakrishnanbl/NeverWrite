@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { AlertTriangle, Download, FileArchive, PenTool, RotateCcw, Settings2 } from 'lucide-react'
+import { AlertTriangle, Download, FileArchive, PenTool, RotateCcw, Scan, Settings2 } from 'lucide-react'
 import {
   apiError,
   batchPlotFileUrl,
@@ -71,6 +71,13 @@ export default function PlotPanel({ target, profileId }: { target: Target; profi
     const chars = target.kind === 'render' ? summary?.unplottable_chars ?? [] : batch?.cards.flatMap((c) => c.unplottable_chars) ?? []
     return [...new Set(chars)]
   }, [target.kind, summary, batch])
+  const traced = useMemo(() => {
+    const chars = target.kind === 'render' ? summary?.traced_chars ?? [] : batch?.cards.flatMap((c) => c.traced_chars) ?? []
+    return [...new Set(chars)]
+  }, [target.kind, summary, batch])
+  const anyDrawn = target.kind === 'render'
+    ? (summary?.drawn_chars.length ?? 0) > 0
+    : batch?.cards.some((c) => c.drawn_chars.length > 0) ?? false
   const clipped = target.kind === 'render' ? summary?.clipped_strokes ?? 0 : batch?.cards.reduce((n, c) => n + c.clipped_strokes, 0) ?? 0
 
   const fileUrl = (fmt: PlotFormat) =>
@@ -206,13 +213,31 @@ export default function PlotPanel({ target, profileId }: { target: Target; profi
             </div>
           )}
 
+          {traced.length > 0 && (
+            <div className="bg-ink-50 border border-ink-100 rounded-xl p-3 flex gap-2.5 text-sm text-ink-700">
+              <Scan className="w-4 h-4 shrink-0 mt-0.5 text-ink-500" />
+              <p>
+                {anyDrawn ? (
+                  <>Traced from scans: <span className="font-mono tracking-widest">{traced.join(' ')}</span>. Their</>
+                ) : (
+                  <>Every letter here was traced from a scan. The</>
+                )}{' '}
+                pen paths follow the middle of the ink, so where strokes cross or loop the pen may take a slightly
+                different route than you did.{' '}
+                <Link to={`/profiles/${profileId}/glyphs?paths=1`} className="underline font-medium">Check the paths</Link>
+                , or{' '}
+                <Link to={`/profiles/${profileId}/draw`} className="underline font-medium">draw a letter</Link> to give
+                it your exact path.
+              </p>
+            </div>
+          )}
           {unplottable.length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex gap-2.5 text-sm text-amber-900">
               <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
               <p>
-                Left out of the plot, because these letters came from a scan:{' '}
-                <span className="font-mono tracking-widest">{unplottable.join(' ')}</span>.{' '}
-                <Link to={`/profiles/${profileId}/draw`} className="underline font-medium">Draw them</Link> to plot them.
+                Left out of the plot, because their glyph images are missing:{' '}
+                <span className="font-mono tracking-widest">{unplottable.join(' ')}</span>. Upload that sheet again or{' '}
+                <Link to={`/profiles/${profileId}/draw`} className="underline font-medium">draw them</Link>.
               </p>
             </div>
           )}

@@ -50,7 +50,7 @@ export default function Draw() {
 
   const bySlot = useMemo(() => new Map(glyphs.map((g) => [slotKey(g.char, g.variant_index), g])), [glyphs])
   const drawn = useMemo(
-    () => new Set(glyphs.filter((g) => g.has_strokes).map((g) => slotKey(g.char, g.variant_index))),
+    () => new Set(glyphs.filter((g) => g.stroke_source === 'drawn').map((g) => slotKey(g.char, g.variant_index))),
     [glyphs]
   )
   const sheet = SHEETS.find((s) => s.charset.includes(slot.char)) ?? SHEETS[0]
@@ -59,7 +59,7 @@ export default function Draw() {
     getGlyphs(pid)
       .then((gs) => {
         setGlyphs(gs)
-        const done = new Set(gs.filter((g) => g.has_strokes).map((g) => slotKey(g.char, g.variant_index)))
+        const done = new Set(gs.filter((g) => g.stroke_source === 'drawn').map((g) => slotKey(g.char, g.variant_index)))
         setSlot(nextUndrawn(done, null) ?? ALL_SLOTS[0])
       })
       .catch(() => setMessage({ ok: false, text: 'Failed to load this profile’s letters.' }))
@@ -201,7 +201,7 @@ export default function Draw() {
       const updated = [...glyphs.filter((g) => g.id !== glyph.id), glyph]
       setGlyphs(updated)
       setStrokes([])
-      const done = new Set(updated.filter((g) => g.has_strokes).map((g) => slotKey(g.char, g.variant_index)))
+      const done = new Set(updated.filter((g) => g.stroke_source === 'drawn').map((g) => slotKey(g.char, g.variant_index)))
       const next = nextUndrawn(done, slot)
       setMessage({
         ok: true,
@@ -251,8 +251,8 @@ export default function Draw() {
             Write each character three times, sitting on the solid line. The dashed line is the height of a small x.
           </p>
           <p className="text-sm text-ink-400 mt-1">
-            Drawn letters are what a pen plotter follows. A stylus on a tablet looks closest to pen on paper; a finger
-            or mouse works too.
+            A pen plotter follows a drawn letter exactly as you wrote it. A stylus on a tablet looks closest to pen on
+            paper; a finger or mouse works too.
           </p>
         </div>
         <button
@@ -407,8 +407,8 @@ export default function Draw() {
                       <div className="mt-1 flex items-center justify-between text-xs">
                         <span className="text-ink-500">{v + 1}</span>
                         {g && (
-                          <span className={g.has_strokes ? 'text-green-700' : 'text-amber-700'}>
-                            {g.has_strokes ? 'drawn' : 'scanned'}
+                          <span className={g.stroke_source === 'drawn' ? 'text-green-700' : 'text-ink-500'}>
+                            {g.stroke_source === 'drawn' ? 'drawn' : 'scanned'}
                           </span>
                         )}
                       </div>
@@ -417,8 +417,8 @@ export default function Draw() {
                 })}
               </div>
               <p className="mt-3 text-xs text-ink-400">
-                Saving replaces the highlighted slot. Scanned letters can’t be plotted, since they’re pictures of
-                ink; draw over them to make them plottable.
+                Saving replaces the highlighted slot. A scanned letter is plotted along a line traced through the
+                middle of its ink; drawing it instead gives the plotter the exact path your pen took.
               </p>
             </div>
 
