@@ -44,6 +44,7 @@ export interface Glyph {
   bearing_right: number
   accepted: boolean
   issue?: string | null // why extraction held this variant back for review
+  has_strokes?: boolean // drawn on the Draw page, so a pen plotter can write it
 }
 
 export interface GlyphPatch {
@@ -222,6 +223,18 @@ export async function patchGlyph(
   return res.data
 }
 
+/** One stroke: [x, y] points in millimetres of the writing box, in the order the pen moved. */
+export type DrawnStroke = [number, number][]
+
+/** Save one variant of a character drawn on the Draw page, replacing whatever that slot held. */
+export async function saveDrawnGlyph(
+  profileId: number,
+  body: { char: string; variant_index: number; strokes: DrawnStroke[] }
+): Promise<Glyph> {
+  const res = await http.post<Glyph>(`/profiles/${profileId}/drawn-glyphs`, body)
+  return res.data
+}
+
 // ─── Renders ──────────────────────────────────────────────────────────────────
 
 export async function startRender(
@@ -270,4 +283,85 @@ export function getBatchFileUrl(batchId: number, kind: 'pdf' | 'zip'): string {
 export async function getTemplates(): Promise<TemplateInfo[]> {
   const res = await http.get<TemplateInfo[]>('/templates')
   return res.data
+}
+
+// ─── Plot files ───────────────────────────────────────────────────────────────
+
+export type PlotFormat = 'svg' | 'gcode' | 'hpgl'
+
+/** Machine settings for plot files. Speeds are mm/min. Mirrors PlotQuery in backend/app/routers/plots.py. */
+export interface PlotSettings {
+  pen_width_mm: number
+  draw_speed: number
+  travel_speed: number
+  pen_up_z: number
+  pen_down_z: number
+  z_speed: number
+  lift_time_s: number
+  offset_x: number
+  offset_y: number
+}
+
+export interface PlotSummary {
+  format: PlotFormat
+  page: number
+  page_count: number
+  width_mm: number
+  height_mm: number
+  strokes: number
+  pen_lifts: number
+  draw_mm: number
+  travel_mm: number
+  seconds: number
+  unplottable_chars: string[] // on the card, but drawn from a scan, so left out of the plot
+  missing_chars: string[]     // no glyph at all
+  clipped_strokes: number     // cut at the card edge
+}
+
+export interface BatchPlotSummary {
+  format: PlotFormat
+  cards: (PlotSummary & { label: string })[]
+  total_seconds: number
+  total_draw_mm: number
+  total_pen_lifts: number
+}
+
+function plotQuery(format: PlotFormat, settings: PlotSettings, extra: Record<string, number> = {}): string {
+  const params = new URLSearchParams({ format })
+  for (const [key, value] of Object.entries({ ...settings, ...extra })) params.set(key, String(value))
+  return params.toString()
+}
+
+/** The API's explanation for a failed request, or `fallback`. */
+export function apiError(err: unknown, fallback: string): string {
+  if (axios.isAxiosError(err)) {
+    const detail = err.response?.data?.detail
+    if (typeof detail === 'string') return detail
+    if (Array.isArray(detail) && detail[0]?.msg) return String(detail[0].msg).replace(/^Value error, /, '')
+  }
+  return fallback
+}
+
+export async function getRenderPlot(
+  renderId: number, format: PlotFormat, settings: PlotSettings, page = 1
+): Promise<PlotSummary> {
+  const res = await http.get<PlotSummary>(`/renders/${renderId}/plot?${plotQuery(format, settings, { page })}`)
+  return res.data
+}
+
+export function renderPlotFileUrl(renderId: number, format: PlotFormat, settings: PlotSettings, page = 1): string {
+  return `/api/renders/${renderId}/plot/file?${plotQuery(format, settings, { page })}`
+}
+
+export async function getBatchPlot(batchId: number, format: PlotFormat, settings: PlotSettings): Promise<BatchPlotSummary> {
+  const res = await http.get<BatchPlotSummary>(`/render-batches/${batchId}/plot?${plotQuery(format, settings)}`)
+  return res.data
+}
+
+export function batchPlotFileUrl(batchId: number, format: PlotFormat, settings: PlotSettings, card: number): string {
+  return `/api/render-batches/${batchId}/plot/file?${plotQuery(format, settings, { card })}`
+}
+
+export function batchPlotZipUrl(batchId: number, format: PlotFormat, settings: PlotSettings): string {
+  return `/api/render-batches/${batchId}/plot/zip?${plotQuery(format, settings)}`
 }

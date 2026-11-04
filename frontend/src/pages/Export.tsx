@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Download, ArrowLeft, CheckCircle, AlertCircle, AlertTriangle, FileImage, FileText } from 'lucide-react'
+import { ArrowLeft, CheckCircle, AlertCircle, AlertTriangle, FileImage, FileText } from 'lucide-react'
 import { getRender, getRenderFileUrl, RenderJob, RenderSettings } from '../lib/api'
+import PlotPanel from '../components/PlotPanel'
 
 export default function Export() {
   const { profileId, renderId } = useParams<{ profileId: string; renderId: string }>()
@@ -132,16 +133,9 @@ export default function Export() {
               Download PNG
               <span className="ml-auto text-xs bg-ink-100 text-ink-500 px-2 py-0.5 rounded-full">Soon</span>
             </button>
-            <button
-              disabled
-              className="flex items-center gap-3 w-full border border-ink-200 text-ink-400 px-5 py-3.5 rounded-xl font-semibold cursor-not-allowed"
-              title="Coming soon"
-            >
-              <Download className="w-5 h-5" />
-              Download SVG
-              <span className="ml-auto text-xs bg-ink-100 text-ink-500 px-2 py-0.5 rounded-full">Soon</span>
-            </button>
           </div>
+
+          <PlotPanel target={{ kind: 'render', renderId: Number(renderId) }} profileId={Number(profileId)} />
         </div>
       )}
 

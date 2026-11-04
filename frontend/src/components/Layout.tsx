@@ -7,6 +7,7 @@ const PAGE_TITLES: [string, string][] = [
   ['/template', 'Template sheets'],
   ['/profiles', 'Profiles'],
   ['/profiles/:profileId/capture', 'Upload sheets'],
+  ['/profiles/:profileId/draw', 'Draw letters'],
   ['/profiles/:profileId/processing/:jobId', 'Processing'],
   ['/profiles/:profileId/glyphs', 'Glyph review'],
   ['/profiles/:profileId/preview', 'Style preview'],

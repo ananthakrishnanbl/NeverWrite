@@ -4,6 +4,7 @@ import Landing from './pages/Landing'
 import TemplateDownload from './pages/TemplateDownload'
 import ProfileList from './pages/ProfileList'
 import Capture from './pages/Capture'
+import Draw from './pages/Draw'
 import Processing from './pages/Processing'
 import GlyphReview from './pages/GlyphReview'
 import StylePreview from './pages/StylePreview'
@@ -20,6 +21,7 @@ export default function App() {
         <Route path="/profiles" element={<ProfileList />} />
         <Route path="/profiles/new" element={<Navigate to="/template" replace />} />
         <Route path="/profiles/:profileId/capture" element={<Capture />} />
+        <Route path="/profiles/:profileId/draw" element={<Draw />} />
         <Route path="/profiles/:profileId/processing/:jobId" element={<Processing />} />
         <Route path="/profiles/:profileId/glyphs" element={<GlyphReview />} />
         <Route path="/profiles/:profileId/preview" element={<StylePreview />} />

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Check, X, ChevronRight, SlidersHorizontal, Upload, AlertTriangle } from 'lucide-react'
+import { Check, X, ChevronRight, SlidersHorizontal, Upload, AlertTriangle, PenTool } from 'lucide-react'
 import { getGlyphs, patchGlyph, Glyph, GlyphPatch } from '../lib/api'
 import { estimateXHeight } from '../lib/layout'
 import { SHEETS, Sheet, VARIANTS_PER_CHAR, READY_VARIANTS } from '../lib/sheets'
@@ -174,6 +174,13 @@ export default function GlyphReview() {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <button
+            onClick={() => navigate(`/profiles/${profileId}/draw`)}
+            className="flex items-center gap-2 border border-ink-300 text-ink-700 px-4 py-2.5 rounded-lg font-medium hover:bg-ink-50 transition-colors"
+          >
+            <PenTool className="w-4 h-4" />
+            Draw Letters
+          </button>
+          <button
             onClick={() => navigate(`/profiles/${profileId}/capture?sheet=${sheetNumber}`)}
             className="flex items-center gap-2 border border-ink-300 text-ink-700 px-4 py-2.5 rounded-lg font-medium hover:bg-ink-50 transition-colors"
           >
@@ -276,6 +283,11 @@ export default function GlyphReview() {
                         >
                           <GlyphThumb glyph={g} scale={scale} />
                         </button>
+                        {g.has_strokes && (
+                          <span className="absolute top-1 left-1" title="Drawn in the browser, so a pen plotter can write it">
+                            <PenTool className="w-3.5 h-3.5 text-ink-400" />
+                          </span>
+                        )}
                         {g.issue && (
                           <span className="absolute top-1 right-1" title={g.issue}>
                             <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
