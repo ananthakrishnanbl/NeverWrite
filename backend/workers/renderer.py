@@ -340,10 +340,10 @@ def _doesnt_fit_message(settings: Dict[str, Any], subject: str) -> str:
     )
 
 
-def _card_filename(number: int, label: str) -> str:
-    """File name for one card in the zip, such as ``card_03_Meera.pdf``."""
+def _card_filename(number: int, label: str, ext: str = "pdf") -> str:
+    """File name for one card in a zip, such as ``card_03_Meera.pdf``."""
     slug = re.sub(r"[^\w]+", "-", label).strip("-_")[:40]
-    return f"card_{number:02d}_{slug}.pdf" if slug else f"card_{number:02d}.pdf"
+    return f"card_{number:02d}_{slug}.{ext}" if slug else f"card_{number:02d}.{ext}"
 
 
 # ---------------------------------------------------------------------------

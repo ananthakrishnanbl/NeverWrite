@@ -11,6 +11,7 @@ from app.routers.scans import router as scans_router
 from app.routers.glyphs import router as glyphs_router
 from app.routers.renders import router as renders_router
 from app.routers.jobs import router as jobs_router
+from app.routers.plots import router as plots_router
 
 # ---------------------------------------------------------------------------
 # Application instance
@@ -74,6 +75,7 @@ app.include_router(scans_router, prefix=API_PREFIX)
 app.include_router(glyphs_router, prefix=API_PREFIX)
 app.include_router(renders_router, prefix=API_PREFIX)
 app.include_router(jobs_router, prefix=API_PREFIX)
+app.include_router(plots_router, prefix=API_PREFIX)
 
 
 # ---------------------------------------------------------------------------
