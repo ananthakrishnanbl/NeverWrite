@@ -55,7 +55,7 @@ def init_db() -> None:
 # Columns added after the first release. create_all only creates missing
 # tables, so older databases get these through ALTER TABLE.
 _NEW_COLUMNS = {
-    "glyphs": {"issue": "VARCHAR"},
+    "glyphs": {"issue": "VARCHAR", "strokes_json": "TEXT"},
     "render_jobs": {"missing_chars": "VARCHAR"},
 }
 

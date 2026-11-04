@@ -840,6 +840,7 @@ def _save_glyphs(
         glyph.bearing_right = bearing
         glyph.accepted = g.issue is None
         glyph.issue = g.issue
+        glyph.strokes_json = None  # a scan replaces any drawn strokes in this slot
 
         metrics_list.append({
             "stroke_w": _estimate_stroke_width((g.alpha > 0.5).astype(np.uint8) * 255),
