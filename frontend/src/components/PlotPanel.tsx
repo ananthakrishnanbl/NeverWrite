@@ -68,16 +68,16 @@ export default function PlotPanel({ target, profileId }: { target: Target; profi
 
   const shown: PlotSummary | null = target.kind === 'render' ? summary : batch?.cards[card - 1] ?? null
   const unplottable = useMemo(() => {
-    const chars = target.kind === 'render' ? summary?.unplottable_chars ?? [] : batch?.cards.flatMap((c) => c.unplottable_chars) ?? []
+    const chars = target.kind === 'render' ? summary?.unplottable_chars ?? [] : batch?.cards.flatMap((c) => c.unplottable_chars ?? []) ?? []
     return [...new Set(chars)]
   }, [target.kind, summary, batch])
   const traced = useMemo(() => {
-    const chars = target.kind === 'render' ? summary?.traced_chars ?? [] : batch?.cards.flatMap((c) => c.traced_chars) ?? []
+    const chars = target.kind === 'render' ? summary?.traced_chars ?? [] : batch?.cards.flatMap((c) => c.traced_chars ?? []) ?? []
     return [...new Set(chars)]
   }, [target.kind, summary, batch])
   const anyDrawn = target.kind === 'render'
-    ? (summary?.drawn_chars.length ?? 0) > 0
-    : batch?.cards.some((c) => c.drawn_chars.length > 0) ?? false
+    ? (summary?.drawn_chars?.length ?? 0) > 0
+    : batch?.cards.some((c) => (c.drawn_chars?.length ?? 0) > 0) ?? false
   const clipped = target.kind === 'render' ? summary?.clipped_strokes ?? 0 : batch?.cards.reduce((n, c) => n + c.clipped_strokes, 0) ?? 0
 
   const fileUrl = (fmt: PlotFormat) =>
