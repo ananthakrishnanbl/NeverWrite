@@ -18,7 +18,8 @@ Stage overview
     texture survive. The light cyan guides drop out by colour (or by
     lightness on a black-and-white print). Specks are removed and pinholes
     filled. Empty boxes, and ink touching a box edge, are flagged.
-5.  Save the variants found, replacing only those, and update the profile
+5.  Save the variants found, replacing only those, with pen paths traced
+    through the middle of their ink for plotting, and update the profile
     metrics.
 
 A photo without markers (a hand-drawn sheet) falls back to grouping ink into
@@ -45,6 +46,7 @@ from app import jobs as job_store
 from app.models.glyph import Glyph
 from app.models.profile import Profile
 from app.storage import get_file_path, save_glyph_mask
+from workers.tracing import set_traced_strokes, trace_mask
 from workers.template import (
     ARUCO_DICT,
     CANVAS_H_PX,
@@ -840,7 +842,9 @@ def _save_glyphs(
         glyph.bearing_right = bearing
         glyph.accepted = g.issue is None
         glyph.issue = g.issue
-        glyph.strokes_json = None  # a scan replaces any drawn strokes in this slot
+        # Pen paths for a plotter, traced through the middle of the ink. This
+        # replaces any strokes the slot had, drawn ones included.
+        set_traced_strokes(glyph, trace_mask(g.alpha))
 
         metrics_list.append({
             "stroke_w": _estimate_stroke_width((g.alpha > 0.5).astype(np.uint8) * 255),

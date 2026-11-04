@@ -1,4 +1,4 @@
-"""Letters drawn in the browser, and the plot files built from them.
+"""Letters drawn in the browser, scanned letters traced for plotting, and the plot files built from them.
 
 A plot file must only ever ask the machine for single-line pen moves inside
 the card: no filled shapes, no heater or extruder commands, the pen up before
@@ -36,8 +36,10 @@ from stroke_letters import CHARS, letter
 from workers.extraction import ExtractedGlyph, _save_glyphs
 from workers.plot_sim import simulate_gcode, simulate_hpgl
 from workers.plotter import clip_path, order_paths
-from workers.strokes import STROKE_WIDTH_MM, StrokeError, build_glyph, clean_strokes, simplify
+from workers.geometry import simplify
+from workers.strokes import STROKE_WIDTH_MM, StrokeError, build_glyph, clean_strokes
 from workers.template import BASELINE_FROM_TOP_MM, PX_PER_MM
+from workers.tracing import TRACE_VERSION
 
 NOTE = (
     "Dear Meera,\n\nThank you so much for the lovely brass lamp. It already lights up our new home, "
@@ -169,7 +171,8 @@ def test_draw_endpoint_saves_and_replaces_a_slot(env, tmp_path) -> None:
     assert not (tmp_path / first["mask_path"]).exists() and (tmp_path / second["mask_path"]).exists()
 
     listed = client.get(f"/api/profiles/{pid}/glyphs").json()
-    assert [(g["char"], g["variant_index"], g["has_strokes"]) for g in listed] == [("a", 1, True)]
+    assert [(g["char"], g["variant_index"], g["has_strokes"], g["stroke_source"]) for g in listed] == [
+        ("a", 1, True, "drawn")]
     metrics = json.loads(db.get(Profile, pid).metrics_json)
     assert metrics["x_height"] == second["height"]
 
@@ -188,17 +191,25 @@ def test_draw_endpoint_rejects_bad_drawings(env, body) -> None:
                        json={"char": "a", "variant_index": 0, "strokes": letter("a")}).status_code == 404
 
 
+def scan(db, profile_id: int, char: str, variant: int = 0) -> None:
+    """Save a scanned glyph: a 4 px wide upright bar, as extraction would."""
+    alpha = np.zeros((20, 10), np.float32)
+    alpha[5:15, 3:7] = 1.0
+    _save_glyphs([ExtractedGlyph(char, variant, alpha, 2.0)], profile_id, db, bearing=6.0, tag="scan")
+
+
 def test_a_rescan_replaces_drawn_strokes(env) -> None:
     client, db = env
     pid = new_profile(db)
     draw(client, pid, "a")
-    alpha = np.zeros((20, 10), np.float32)
-    alpha[5:15, 3:7] = 1.0
-    _save_glyphs([ExtractedGlyph("a", 0, alpha, 2.0)], pid, db, bearing=6.0, tag="scan")
+    scan(db, pid, "a")
     db.expire_all()
     rows = {g.variant_index: g for g in db.query(Glyph).filter(Glyph.char == "a")}
-    assert rows[0].strokes_json is None and not rows[0].has_strokes
-    assert rows[1].has_strokes and rows[2].has_strokes
+    # The scanned slot now holds a path traced down the middle of the bar
+    assert rows[0].stroke_source == "traced"
+    (stroke,) = rows[0].strokes()
+    assert all(x == pytest.approx(5.0, abs=0.3) for x, _ in stroke) and stroke[-1][1] - stroke[0][1] > 3
+    assert rows[1].stroke_source == "drawn" and rows[2].stroke_source == "drawn"
 
 
 # ---------------------------------------------------------------------------
@@ -328,26 +339,82 @@ def test_dots_are_plotted(drawn) -> None:
     assert len(simulate_hpgl(client.get(f"/api/renders/{rid}/plot/file", params={"format": "hpgl"}).text).dots) == 1
 
 
-def test_letters_without_strokes_are_listed(env) -> None:
+def test_traced_letters_are_listed(env) -> None:
     client, db = env
     pid = new_profile(db)
     draw(client, pid, "abc")
-    alpha = np.zeros((20, 10), np.float32)
-    alpha[5:15, 3:7] = 1.0
-    _save_glyphs([ExtractedGlyph("d", 0, alpha, 2.0)], pid, db, bearing=6.0, tag="scan")
+    scan(db, pid, "d")
     summary = client.get(f"/api/renders/{add_render(db, pid, text='cab dab xy')}/plot").json()
-    assert summary["unplottable_chars"] == ["d"]
+    assert summary["traced_chars"] == ["d"] and summary["drawn_chars"] == ["c", "a", "b"]
+    assert summary["unplottable_chars"] == []
     assert summary["missing_chars"] == ["x", "y"]
 
 
-def test_a_scanned_profile_cant_be_plotted(env) -> None:
+def test_a_scanned_profile_is_plotted(env) -> None:
     client, db = env
     pid = new_profile(db)
-    alpha = np.zeros((20, 10), np.float32)
-    alpha[5:15, 3:7] = 1.0
-    _save_glyphs([ExtractedGlyph("a", 0, alpha, 2.0)], pid, db, bearing=6.0, tag="scan")
+    scan(db, pid, "a")
+    rid = add_render(db, pid, text="aaa")
+    summary = client.get(f"/api/renders/{rid}/plot").json()
+    assert summary["traced_chars"] == ["a"] and summary["pen_lifts"] == 3
+    sim = simulate_gcode(client.get(f"/api/renders/{rid}/plot/file", params={"format": "gcode"}).text)
+    assert sim.problems == [] and sim.pen_downs == 3 and sim.draw_mm > 0
+
+
+def test_older_scans_are_traced_when_first_needed(env, tmp_path) -> None:
+    client, db = env
+    pid = new_profile(db)
+    scan(db, pid, "a")
+    # As if the glyph had been saved before tracing existed
+    glyph = db.query(Glyph).one()
+    glyph.strokes_json, glyph.stroke_source, glyph.trace_version = None, None, None
+    db.commit()
+
+    strokes = client.get(f"/api/profiles/{pid}/strokes").json()
+    assert strokes[str(glyph.id)]["source"] == "traced" and len(strokes[str(glyph.id)]["strokes"]) == 1
+    db.expire_all()
+    assert db.get(Glyph, glyph.id).stroke_source == "traced"
+
+    # A glyph whose image has gone can't be traced, and is listed as unplottable
+    draw(client, pid, "b")
+    glyph = db.get(Glyph, glyph.id)
+    glyph.strokes_json, glyph.stroke_source, glyph.trace_version = None, None, None
+    db.commit()
+    (tmp_path / glyph.mask_path).unlink()
+    summary = client.get(f"/api/renders/{add_render(db, pid, text='ab')}/plot").json()
+    assert summary["unplottable_chars"] == ["a"] and summary["traced_chars"] == []
+
+
+def test_paths_from_an_older_tracer_are_traced_again(env) -> None:
+    client, db = env
+    pid = new_profile(db)
+    scan(db, pid, "a")
+    glyph = db.query(Glyph).one()
+    glyph.strokes_json, glyph.trace_version = "[[[1,1],[2,2]]]", 0
+    db.commit()
+    client.get(f"/api/profiles/{pid}/strokes")
+    db.expire_all()
+    glyph = db.get(Glyph, glyph.id)
+    assert glyph.trace_version == TRACE_VERSION and glyph.strokes_json != "[[[1,1],[2,2]]]"
+
+
+def test_drawn_strokes_are_never_retraced(env) -> None:
+    client, db = env
+    pid = new_profile(db)
+    draw(client, pid, "a")
+    before = {g.id: g.strokes_json for g in db.query(Glyph)}
+    strokes = client.get(f"/api/profiles/{pid}/strokes").json()
+    assert {v["source"] for v in strokes.values()} == {"drawn"}
+    db.expire_all()
+    assert {g.id: g.strokes_json for g in db.query(Glyph)} == before
+
+
+def test_an_empty_profile_cant_be_plotted(env) -> None:
+    client, db = env
+    pid = new_profile(db)
     res = client.get(f"/api/renders/{add_render(db, pid, text='aaa')}/plot")
-    assert res.status_code == 409 and "Draw page" in res.json()["detail"]
+    assert res.status_code == 409 and "no letters" in res.json()["detail"]
+    assert client.get("/api/profiles/999/strokes").status_code == 404
 
 
 def test_pages_and_overflow(drawn) -> None:

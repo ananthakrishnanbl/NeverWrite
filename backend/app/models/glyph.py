@@ -49,11 +49,17 @@ class Glyph(Base):
         Why extraction held this glyph back for review (for example ink
         touching the box edge), or ``None`` when nothing looked wrong.
     strokes_json:
-        For a glyph drawn on the Draw page, the path the pen tip took: a
-        JSON list of strokes, each a list of ``[x, y]`` points in the mask's
-        pixel coordinates (origin at its top-left corner, y down). Plot
-        exports follow these. ``None`` for a glyph cut from a scanned sheet,
-        which has no centreline a plotter could follow.
+        The pen paths a plotter follows: a JSON list of strokes, each a list
+        of ``[x, y]`` points in the mask's pixel coordinates (origin at its
+        top-left corner, y down). ``None`` until a scanned glyph is traced.
+    stroke_source:
+        ``"drawn"`` when the strokes are the path the pen took on the Draw
+        page, ``"traced"`` when they were traced through the middle of a
+        scanned glyph's ink (see ``workers/tracing.py``), ``None`` when there
+        are none yet.
+    trace_version:
+        Which version of the tracer made traced strokes, so they are traced
+        again after it improves (``TRACE_VERSION`` in ``workers/tracing.py``).
     """
 
     __tablename__ = "glyphs"
@@ -72,10 +78,12 @@ class Glyph(Base):
     accepted: bool = Column(Boolean, nullable=False, default=True)
     issue: str = Column(String, nullable=True)
     strokes_json: str = Column(Text, nullable=True)
+    stroke_source: str = Column(String(16), nullable=True)
+    trace_version: int = Column(Integer, nullable=True)
 
     @property
     def has_strokes(self) -> bool:
-        """Whether this glyph was drawn, so a plotter can write it."""
+        """Whether this glyph has pen paths, drawn or traced, so a plotter can write it."""
         return bool(self.strokes_json)
 
     def strokes(self) -> Optional[List[List[Tuple[float, float]]]]:

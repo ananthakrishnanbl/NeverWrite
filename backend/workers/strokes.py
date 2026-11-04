@@ -17,7 +17,7 @@ import json
 import math
 import uuid
 from dataclasses import dataclass
-from typing import Any, List, Sequence, Tuple
+from typing import Any, List, Tuple
 
 import cv2
 import numpy as np
@@ -25,6 +25,7 @@ import numpy as np
 from app.models.glyph import Glyph
 from app.storage import get_file_path, save_glyph_mask
 from workers.extraction import _TEMPLATE_BEARING_PX, _alpha_png, _update_profile_metrics
+from workers.geometry import simplify
 from workers.template import BASELINE_FROM_TOP_MM, BOX_H_MM, BOX_W_MM, PX_PER_MM, SHEET_CONFIGS, VARIANTS
 
 Point = Tuple[float, float]
@@ -110,34 +111,6 @@ def clean_strokes(raw: Any) -> List[Stroke]:
     return strokes
 
 
-def simplify(points: Sequence[Point], tolerance: float) -> Stroke:
-    """Ramer-Douglas-Peucker: keep the end points and every point that bends the line by more than *tolerance*."""
-    if len(points) < 3:
-        return list(points)
-    keep = [False] * len(points)
-    keep[0] = keep[-1] = True
-    stack = [(0, len(points) - 1)]
-    while stack:
-        first, last = stack.pop()
-        (ax, ay), (bx, by) = points[first], points[last]
-        dx, dy = bx - ax, by - ay
-        length = math.hypot(dx, dy)
-        worst, worst_i = -1.0, -1
-        for i in range(first + 1, last):
-            px, py = points[i]
-            if length == 0:
-                d = math.hypot(px - ax, py - ay)
-            else:
-                d = abs(dy * px - dx * py + bx * ay - by * ax) / length
-            if d > worst:
-                worst, worst_i = d, i
-        if worst > tolerance:
-            keep[worst_i] = True
-            stack.append((first, worst_i))
-            stack.append((worst_i, last))
-    return [p for p, k in zip(points, keep) if k]
-
-
 def build_glyph(strokes_mm: List[Stroke]) -> DrawnGlyph:
     """Scale strokes to glyph pixels, crop to the ink and draw the alpha mask."""
     half = STROKE_WIDTH_MM * PX_PER_MM / 2
@@ -216,6 +189,8 @@ def save_drawn_glyph(db: Any, profile_id: int, char: str, variant: int, raw_stro
     glyph.accepted = True
     glyph.issue = None
     glyph.strokes_json = json.dumps(drawn.strokes, separators=(",", ":"))
+    glyph.stroke_source = "drawn"
+    glyph.trace_version = None
     db.commit()
     db.refresh(glyph)
 

@@ -20,7 +20,8 @@ class GlyphRead(BaseModel):
     bearing_right: float
     accepted: bool
     issue: Optional[str] = None
-    has_strokes: bool = Field(default=False, description="True for a glyph drawn on the Draw page, which a pen plotter can write.")
+    has_strokes: bool = Field(default=False, description="True when the glyph has pen paths a plotter can follow.")
+    stroke_source: Optional[str] = Field(default=None, description='"drawn" (from the Draw page), "traced" (from a scan), or null.')
 
     class Config:
         from_attributes = True

@@ -36,12 +36,13 @@ from workers.plotter import (
     zip_files,
 )
 from workers.renderer import _card_filename, _doesnt_fit_message, _load_inputs, is_single_page, missing_chars
+from workers.tracing import trace_missing
 
 router = APIRouter(tags=["plots"])
 
 _NOTHING_TO_PLOT = (
-    "This profile has no drawn letters, so there is nothing a plotter can follow. Letters cut from "
-    "scanned sheets are pictures of ink; draw the letters on the Draw page to plot them."
+    "This profile has no letters a plotter can follow yet. Upload a scanned sheet or draw the "
+    "letters on the Draw page."
 )
 
 
@@ -211,6 +212,8 @@ def _plot_inputs(db: Session, profile_id: int, settings_json: str):
         glyphs, settings, x_height = _load_inputs(db, profile_id, settings_json)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    # Scans from before tracing existed get their pen paths now, once
+    trace_missing(glyphs, db)
     if not plottable(glyphs):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_NOTHING_TO_PLOT)
     return glyphs, settings, x_height
@@ -237,6 +240,8 @@ def _summary(plot: CardPlot, q: PlotQuery, missing: List[str]) -> Dict[str, Any]
         "travel_mm": round(stats.travel_mm, 1),
         "seconds": round(stats.seconds, 1),
         "unplottable_chars": plot.unplottable,
+        "traced_chars": plot.traced,
+        "drawn_chars": plot.drawn,
         "missing_chars": missing,
         "clipped_strokes": plot.clipped,
     }

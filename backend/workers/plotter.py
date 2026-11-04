@@ -1,8 +1,9 @@
 """Plot files for pen plotters: SVG, G-code and HPGL.
 
 A plotter can only drag a pen along lines: it can't print a picture or fill a
-shape. So plot files are built from the strokes recorded on the Draw page
-(the path the pen tip took), never from the glyph images.
+shape. So plot files are built from each glyph's pen paths, never from its
+image: the path the pen took for a letter drawn on the Draw page, or a line
+traced through the middle of the ink for a scanned one (``workers/tracing.py``).
 
 Each card is laid out with ``layout_text``, exactly as the preview and the
 PDF are, so a given seed gives the same card on paper, on screen and on the
@@ -72,6 +73,8 @@ class CardPlot:
     runs: List[Path]          # pen-down paths, card millimetres, y down
     strokes: int              # strokes before short gaps were joined
     unplottable: List[str]    # characters placed on the card that have no strokes
+    traced: List[str]         # characters placed on the card whose strokes were traced from a scan
+    drawn: List[str]          # characters placed on the card that were drawn on the Draw page
     clipped: int              # strokes cut at the card edge
     page: int
     page_count: int
@@ -120,6 +123,8 @@ def plan_card(
 
     strokes: List[Path] = []
     unplottable: List[str] = []
+    traced: List[str] = []
+    drawn: List[str] = []
     clipped = 0
     cache: Dict[int, Optional[List[Path]]] = {}
     for placed in pages[page - 1]:
@@ -131,6 +136,11 @@ def plan_card(
             if g.char not in unplottable:
                 unplottable.append(g.char)
             continue
+        source = getattr(g, "stroke_source", None)
+        if source == "traced" and g.char not in traced:
+            traced.append(g.char)
+        elif source == "drawn" and g.char not in drawn:
+            drawn.append(g.char)
         for stroke in own:
             on_card = [_to_card(placed, x, y) for x, y in stroke]
             pieces = clip_path(on_card, width, height)
@@ -145,6 +155,8 @@ def plan_card(
         runs=join_paths(ordered),
         strokes=len(strokes),
         unplottable=unplottable,
+        traced=traced,
+        drawn=drawn,
         clipped=clipped,
         page=page,
         page_count=len(pages),

@@ -55,7 +55,7 @@ def init_db() -> None:
 # Columns added after the first release. create_all only creates missing
 # tables, so older databases get these through ALTER TABLE.
 _NEW_COLUMNS = {
-    "glyphs": {"issue": "VARCHAR", "strokes_json": "TEXT"},
+    "glyphs": {"issue": "VARCHAR", "strokes_json": "TEXT", "stroke_source": "VARCHAR(16)", "trace_version": "INTEGER"},
     "render_jobs": {"missing_chars": "VARCHAR"},
 }
 
@@ -69,3 +69,7 @@ def _add_new_columns() -> None:
             for name, sql_type in columns.items():
                 if name not in existing:
                     conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+        # Before scans were traced, only letters drawn on the Draw page had strokes
+        conn.exec_driver_sql(
+            "UPDATE glyphs SET stroke_source = 'drawn' WHERE strokes_json IS NOT NULL AND stroke_source IS NULL"
+        )
