@@ -1,6 +1,6 @@
 # NeverWrite (Prototype)
 
-NeverWrite reproduces a person's own handwriting for wedding envelopes, thank-you notes and gift cards. It turns photographed template sheets into a personal glyph library, then writes any message onto cards and envelopes using a deterministic seeded layout with natural jitter. A message template plus a CSV of names produces a whole set of cards, each in slightly different handwriting.
+NeverWrite reproduces a person's own handwriting for wedding envelopes, thank-you notes and gift cards. It turns photographed template sheets (or letters drawn in the browser) into a personal glyph library, then writes any message onto cards and envelopes using a deterministic seeded layout with natural jitter. A message template plus a CSV of names produces a whole set of cards, each in slightly different handwriting. Cards export as a PDF for printing, or as SVG, G-code or HPGL for a pen plotter.
 
 ---
 
@@ -8,7 +8,7 @@ NeverWrite reproduces a person's own handwriting for wedding envelopes, thank-yo
 
 - **Frontend**: React 18, TypeScript, Vite, Tailwind CSS, Zustand, Lucide React
 - **Backend**: FastAPI, SQLite (via sync SQLAlchemy), Python Background Tasks
-- **Workers**: OpenCV (extraction pipeline) & ReportLab (PDF renderer)
+- **Workers**: OpenCV (extraction pipeline), ReportLab (PDF renderer) & a pen plotter writer (SVG, G-code, HPGL)
 - **Deterministic RNG**: Mulberry32 PRNG (the preview and the PDF place every glyph identically for a given seed)
 
 ---
@@ -26,12 +26,15 @@ NeverWrite/
 │   │   ├── main.py           # FastAPI entry point & static file mount
 │   │   ├── models/           # Profile, Glyph, RenderJob, RenderBatch ORM models
 │   │   ├── schemas/          # Pydantic schemas
-│   │   └── routers/          # /api/profiles, /scans, /glyphs, /renders, /render-batches, /jobs, /templates
+│   │   └── routers/          # /api/profiles, /scans, /glyphs, /drawn-glyphs, /renders, /render-batches, /plot, /jobs, /templates
 │   ├── workers/
 │   │   ├── extraction.py     # OpenCV cell extraction & glyph measurement pipeline
 │   │   ├── renderer.py       # Layout (a port of layout.ts) and ReportLab PDF renderer
-│   │   └── vectorizer.py     # Potrace/SVG converter stub
-│   ├── tests/                # Layout parity test: preview vs PDF
+│   │   ├── strokes.py        # Letters drawn in the browser: clean-up, crop, mask
+│   │   ├── plotter.py        # Plot files from drawn strokes: SVG, G-code, HPGL, plot time
+│   │   ├── plot_sim.py       # Replays G-code or HPGL onto an image, to check a file without a plotter
+│   │   └── vectorizer.py     # Potrace/SVG converter stub (unused)
+│   ├── tests/                # Layout parity, template capture, drawn letters and plot files
 │   ├── requirements.txt
 │   ├── requirements-dev.txt  # adds pytest
 │   └── run.py                # Server runner
@@ -41,9 +44,12 @@ NeverWrite/
 │   │   │   ├── api.ts        # Typed API client
 │   │   │   ├── prng.ts       # Mulberry32 seeded RNG
 │   │   │   ├── layout.ts     # Layout engine & canvas drawing
-│   │   │   └── merge.ts      # CSV parsing and {{placeholder}} filling
+│   │   │   ├── merge.ts      # CSV parsing and {{placeholder}} filling
+│   │   │   ├── draw.ts       # The Draw page's writing box
+│   │   │   └── plot.ts       # Plot formats and machine settings
+│   │   ├── components/       # Layout, PlotPanel (plot export on the Export pages)
 │   │   ├── store/            # Zustand store, saved per profile in localStorage
-│   │   ├── pages/            # Landing, Profiles, Template, Capture, Processing, GlyphReview, Composer, Export
+│   │   ├── pages/            # Landing, Profiles, Template, Capture, Draw, Processing, GlyphReview, Composer, Export
 │   │   └── App.tsx           # Route tree & navigation
 │   └── vite.config.ts        # Vite dev server with proxy to /api & /files
 └── samples/
@@ -94,13 +100,15 @@ pip install -r requirements-dev.txt
 python -m pytest tests
 ```
 
+`backend/tests/test_plotter.py` checks the plot files: only unfilled single-line paths inside the card, G-code that starts and ends with the pen up and has no heater or extruder commands, the same bytes for the same seed, and a G-code replay that draws exactly the planned lines.
+
 ---
 
 ## 🔄 User Workflow in Prototype
 
 1. **Profiles**: Create a new handwriting profile from `/profiles`.
 2. **Template**: Review writing guidelines & download printable sheets.
-3. **Scan/Capture**: Upload a photo or scan of your template sheet.
+3. **Scan/Capture**: Upload a photo or scan of your template sheet. **Or draw**: on the Draw page, write each character three times in the browser (a stylus on a tablet looks closest to pen on paper). Only drawn letters can be plotted.
 4. **Processing**: OpenCV extracts each character cell, trims margins, and measures baseline/bearing metrics.
 5. **Review**: Inspect extracted glyphs, adjust baseline offsets or bearings, and accept/reject variants.
 6. **Composer**: Write a card with a live preview:
@@ -112,3 +120,25 @@ python -m pytest tests
    - Text, settings, seeds and mail-merge data are saved in the browser per profile
 7. **Mail merge**: Switch the Composer to Mail merge, write a template with `{{column}}` placeholders, and upload a CSV (try `samples/guests.csv`). Every card appears in a preview grid with its own seed; reroll any card on its own.
 8. **Export**: One card exports as a PDF. A mail-merged set exports as one PDF with a card per page, plus a zip with a PDF per card. The PDF is ink only, for printing on card stock, and matches the preview exactly.
+9. **Plot**: The Export pages also give plot files for a pen plotter, laid out exactly like the PDF (see below).
+
+---
+
+## 🖊️ Pen plotter files
+
+A plotter can only drag a pen along lines, so plot files follow the strokes recorded on the Draw page. Letters cut from scanned sheets are pictures of ink and are left out of a plot (the Export page lists them).
+
+| Format | For | Notes |
+|---|---|---|
+| SVG (`.svg`) | Inkscape, sign-shop software, most plotters | Millimetres, one unfilled path per pen stroke |
+| G-code (`.gcode`) | A 3D printer with a pen fixed beside the nozzle | Marlin style. Lower the pen until it just touches the card, then start the file: it calls that height pen-down Z, lifts the pen and homes X and Y only. No heater, fan or extruder commands. |
+| HPGL (`.plt`) | Vinyl cutters and older pen plotters | 40 units per mm. On a cutter, turn blade offset compensation off. |
+
+Strokes are ordered so the pen travels as little as possible with the pen up, and anything past the card edge is cut. Each file comes with an estimated plot time: drawing distance over drawing speed, plus travel over travel speed, plus pen lifts. The default speeds are guesses: time one card on the real machine and set them on the Export page (they are remembered in the browser).
+
+To see what a G-code or HPGL file would draw without a plotter:
+
+```powershell
+cd NeverWrite\backend
+python -m workers.plot_sim card.gcode card.png --travel
+```
