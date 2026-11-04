@@ -31,10 +31,11 @@ NeverWrite/
 │   │   ├── extraction.py     # OpenCV cell extraction & glyph measurement pipeline
 │   │   ├── renderer.py       # Layout (a port of layout.ts) and ReportLab PDF renderer
 │   │   ├── strokes.py        # Letters drawn in the browser: clean-up, crop, mask
-│   │   ├── plotter.py        # Plot files from drawn strokes: SVG, G-code, HPGL, plot time
+│   │   ├── tracing.py        # Pen paths for scanned letters, traced through the middle of the ink
+│   │   ├── plotter.py        # Plot files from pen paths: SVG, G-code, HPGL, plot time
 │   │   ├── plot_sim.py       # Replays G-code or HPGL onto an image, to check a file without a plotter
 │   │   └── vectorizer.py     # Potrace/SVG converter stub (unused)
-│   ├── tests/                # Layout parity, template capture, drawn letters and plot files
+│   ├── tests/                # Layout parity, template capture, drawn letters, tracing and plot files
 │   ├── requirements.txt
 │   ├── requirements-dev.txt  # adds pytest
 │   └── run.py                # Server runner
@@ -100,7 +101,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests
 ```
 
-`backend/tests/test_plotter.py` checks the plot files: only unfilled single-line paths inside the card, G-code that starts and ends with the pen up and has no heater or extruder commands, the same bytes for the same seed, and a G-code replay that draws exactly the planned lines.
+`backend/tests/test_plotter.py` checks the plot files: only unfilled single-line paths inside the card, G-code that starts and ends with the pen up and has no heater or extruder commands, the same bytes for the same seed, and a G-code replay that draws exactly the planned lines. `backend/tests/test_tracing.py` draws a test alphabet into glyph masks, traces them, and requires the traced paths to stay on the ink and within a pixel, on average, of the strokes that made them; it also covers faint joins, pinholes, ragged edges, crossings and dots.
 
 ---
 
@@ -108,9 +109,9 @@ python -m pytest tests
 
 1. **Profiles**: Create a new handwriting profile from `/profiles`.
 2. **Template**: Review writing guidelines & download printable sheets.
-3. **Scan/Capture**: Upload a photo or scan of your template sheet. **Or draw**: on the Draw page, write each character three times in the browser (a stylus on a tablet looks closest to pen on paper). Only drawn letters can be plotted.
+3. **Scan/Capture**: Upload a photo or scan of your template sheet. **Or draw**: on the Draw page, write each character three times in the browser (a stylus on a tablet looks closest to pen on paper). A drawn letter gives a plotter the exact path your pen took; a scanned one is traced.
 4. **Processing**: OpenCV extracts each character cell, trims margins, and measures baseline/bearing metrics.
-5. **Review**: Inspect extracted glyphs, adjust baseline offsets or bearings, and accept/reject variants.
+5. **Review**: Inspect extracted glyphs, adjust baseline offsets or bearings, and accept/reject variants. **Show pen paths** draws the line a plotter will follow over every glyph.
 6. **Composer**: Write a card with a live preview:
    - Sizes: A6 card, A7 card, DL envelope (landscape), A4 page, or a custom size
    - Left or centred lines; words too long for a line break between letters
@@ -126,7 +127,10 @@ python -m pytest tests
 
 ## 🖊️ Pen plotter files
 
-A plotter can only drag a pen along lines, so plot files follow the strokes recorded on the Draw page. Letters cut from scanned sheets are pictures of ink and are left out of a plot (the Export page lists them).
+A plotter can only drag a pen along lines, so plot files follow each letter's pen path, never its image:
+
+- **Drawn letters** (Draw page) use the exact path the pen took.
+- **Scanned letters** are traced when the sheet is processed (older scans the first time they are plotted). `workers/tracing.py` thins the ink to its centreline, prunes the branches that ragged edges and blunt stroke ends leave, keeps sharp points sharp (the bottom of a v, the tops of an M), passes crossings straight through, joins strokes across faint gaps, and turns dots into a touch of the pen (or a small spiral for a big blob). The path follows the middle of the ink, so where strokes cross or loop the pen may take a slightly different route than the writer did. Glyph Review's **Show pen paths** shows every path; draw any letter whose path looks wrong.
 
 | Format | For | Notes |
 |---|---|---|
