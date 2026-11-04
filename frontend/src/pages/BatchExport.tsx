@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, CheckCircle, AlertCircle, FileArchive, FileText } from 'lucide-react'
 import { getBatch, getBatchFileUrl, RenderBatch, RenderSettings } from '../lib/api'
 import { MissingChars } from './Export'
+import PlotPanel from '../components/PlotPanel'
 
 export default function BatchExport() {
   const { profileId, batchId } = useParams<{ profileId: string; batchId: string }>()
@@ -96,6 +97,8 @@ export default function BatchExport() {
               Download a PDF per card (zip)
             </a>
           </div>
+
+          <PlotPanel target={{ kind: 'batch', batchId: Number(batchId) }} profileId={Number(profileId)} />
         </div>
       )}
 

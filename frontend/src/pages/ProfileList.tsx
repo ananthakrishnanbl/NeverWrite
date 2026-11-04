@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, PenLine, Camera, ChevronRight, User, Trash2 } from 'lucide-react'
+import { Plus, PenLine, PenTool, Camera, ChevronRight, User, Trash2 } from 'lucide-react'
 import { listProfiles, createProfile, deleteProfile, Profile } from '../lib/api'
 
 export default function ProfileList() {
@@ -147,6 +147,14 @@ export default function ProfileList() {
                 >
                   <Camera className="w-3.5 h-3.5" />
                   Add samples
+                </button>
+                <button
+                  onClick={() => navigate(`/profiles/${p.id}/draw`)}
+                  className="flex items-center gap-1.5 text-sm border border-ink-200 text-ink-600 px-3 py-1.5 rounded-lg hover:bg-ink-50 transition-colors"
+                  title="Draw letters in the browser, for a pen plotter"
+                >
+                  <PenTool className="w-3.5 h-3.5" />
+                  Draw
                 </button>
                 <button
                   onClick={() => navigate(`/profiles/${p.id}/compose`)}

@@ -4,7 +4,10 @@ Each Glyph represents one extracted instance of a single character from a
 handwriting scan.  Multiple variants of the same character can exist for a
 single profile (one per occurrence on the sheet).
 """
-from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, String
+import json
+from typing import List, Optional, Tuple
+
+from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, String, Text
 
 from app.database import Base
 
@@ -45,6 +48,18 @@ class Glyph(Base):
     issue:
         Why extraction held this glyph back for review (for example ink
         touching the box edge), or ``None`` when nothing looked wrong.
+    strokes_json:
+        The pen paths a plotter follows: a JSON list of strokes, each a list
+        of ``[x, y]`` points in the mask's pixel coordinates (origin at its
+        top-left corner, y down). ``None`` until a scanned glyph is traced.
+    stroke_source:
+        ``"drawn"`` when the strokes are the path the pen took on the Draw
+        page, ``"traced"`` when they were traced through the middle of a
+        scanned glyph's ink (see ``workers/tracing.py``), ``None`` when there
+        are none yet.
+    trace_version:
+        Which version of the tracer made traced strokes, so they are traced
+        again after it improves (``TRACE_VERSION`` in ``workers/tracing.py``).
     """
 
     __tablename__ = "glyphs"
@@ -62,3 +77,17 @@ class Glyph(Base):
     bearing_right: float = Column(Float, nullable=False, default=0.0)
     accepted: bool = Column(Boolean, nullable=False, default=True)
     issue: str = Column(String, nullable=True)
+    strokes_json: str = Column(Text, nullable=True)
+    stroke_source: str = Column(String(16), nullable=True)
+    trace_version: int = Column(Integer, nullable=True)
+
+    @property
+    def has_strokes(self) -> bool:
+        """Whether this glyph has pen paths, drawn or traced, so a plotter can write it."""
+        return bool(self.strokes_json)
+
+    def strokes(self) -> Optional[List[List[Tuple[float, float]]]]:
+        """The decoded strokes, or ``None`` for a scanned glyph."""
+        if not self.strokes_json:
+            return None
+        return [[(float(x), float(y)) for x, y in stroke] for stroke in json.loads(self.strokes_json)]

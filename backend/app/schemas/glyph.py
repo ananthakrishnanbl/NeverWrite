@@ -1,5 +1,5 @@
 """Pydantic schemas for the Glyph resource."""
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +20,8 @@ class GlyphRead(BaseModel):
     bearing_right: float
     accepted: bool
     issue: Optional[str] = None
+    has_strokes: bool = Field(default=False, description="True when the glyph has pen paths a plotter can follow.")
+    stroke_source: Optional[str] = Field(default=None, description='"drawn" (from the Draw page), "traced" (from a scan), or null.')
 
     class Config:
         from_attributes = True
@@ -35,3 +37,15 @@ class GlyphUpdate(BaseModel):
     bearing_left: Optional[float] = Field(default=None, description="Left side-bearing in pixels.")
     bearing_right: Optional[float] = Field(default=None, description="Right side-bearing in pixels.")
     baseline_offset: Optional[float] = Field(default=None, description="Pixels the bottom of the mask sits below the baseline (negative = above).")
+
+
+class DrawnGlyphCreate(BaseModel):
+    """Body for POST /profiles/{id}/drawn-glyphs: one character drawn on the Draw page."""
+
+    char: str = Field(..., min_length=1, max_length=1, description="The character drawn.")
+    variant_index: int = Field(..., ge=0, description="Which of the character's slots to fill (0-based).")
+    strokes: List[List[List[float]]] = Field(
+        ...,
+        description="Strokes in millimetres of the 18 x 21 mm writing box, y down: a list of strokes, "
+                    "each a list of [x, y] points in the order the pen moved. One point is a dot.",
+    )

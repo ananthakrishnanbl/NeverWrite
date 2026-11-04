@@ -108,6 +108,13 @@ export default function Capture() {
             Keep all four corner squares in the picture, and upload the original file rather than a copy sent
             through a chat app.
           </p>
+          <p className="text-sm text-ink-400 mt-1">
+            Scanned letters are traced for a pen plotter automatically. For the exact path your pen took,{' '}
+            <button onClick={() => navigate(`/profiles/${profileId}/draw`)} className="underline text-ink-600 hover:text-ink-800">
+              draw your letters in the browser
+            </button>{' '}
+            instead.
+          </p>
         </div>
         {hasExistingGlyphs && (
           <button

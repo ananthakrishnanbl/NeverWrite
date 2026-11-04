@@ -1,8 +1,9 @@
-"""Router: /api/profiles/{id}/glyphs and /api/glyphs/{id}
+"""Router: /api/profiles/{id}/glyphs, /api/profiles/{id}/drawn-glyphs and /api/glyphs/{id}
 
-List and update Glyph records belonging to a Profile.
+List, draw and update Glyph records belonging to a Profile.
 """
-from typing import List, Optional
+import json
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -10,7 +11,9 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.glyph import Glyph
 from app.models.profile import Profile
-from app.schemas.glyph import GlyphRead, GlyphUpdate
+from app.schemas.glyph import DrawnGlyphCreate, GlyphRead, GlyphUpdate
+from workers.strokes import StrokeError, save_drawn_glyph
+from workers.tracing import trace_missing
 
 router = APIRouter(tags=["glyphs"])
 
@@ -50,6 +53,58 @@ def list_glyphs(
     if accepted is not None:
         query = query.filter(Glyph.accepted == accepted)
     return query.order_by(Glyph.char, Glyph.variant_index).all()
+
+
+@router.get(
+    "/profiles/{profile_id}/strokes",
+    summary="Pen paths of every glyph in a profile",
+)
+def list_strokes(profile_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Each glyph's pen paths and where they came from, keyed by glyph id.
+
+    Strokes are in the glyph mask's pixel coordinates. Scanned glyphs that
+    haven't been traced yet are traced now. Glyph Review draws these over the
+    glyphs so a traced path can be checked before plotting.
+    """
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if profile is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Profile {profile_id} not found.")
+    glyphs = db.query(Glyph).filter(Glyph.profile_id == profile_id).all()
+    trace_missing(glyphs, db)
+    return {
+        str(g.id): {"source": g.stroke_source, "strokes": json.loads(g.strokes_json) if g.strokes_json else []}
+        for g in glyphs
+    }
+
+
+@router.post(
+    "/profiles/{profile_id}/drawn-glyphs",
+    summary="Save a character drawn in the browser",
+    response_model=GlyphRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_drawn_glyph(
+    profile_id: int,
+    body: DrawnGlyphCreate,
+    db: Session = Depends(get_db),
+) -> GlyphRead:
+    """Store one variant of a character from the strokes drawn on the Draw page.
+
+    Replaces whatever that character's slot held, drawn or scanned, and keeps
+    the strokes so a pen plotter can write the character.
+
+    Raises
+    ------
+    HTTPException
+        404 if the Profile does not exist, 422 if the drawing can't be used.
+    """
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if profile is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Profile {profile_id} not found.")
+    try:
+        return save_drawn_glyph(db, profile_id, body.char, body.variant_index, body.strokes)
+    except StrokeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.patch(
